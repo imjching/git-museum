@@ -7,6 +7,7 @@ test_description='Test built-in diff output engine.
 
 '
 . ./test-lib.sh
+. ../diff-lib.sh
 
 echo >path0 'Line 1
 Line 2
@@ -16,7 +17,7 @@ chmod +x path1
 
 test_expect_success \
     'update-cache --add two files with and without +x.' \
-    'git-update-cache --add path0 path1'
+    'git-update-index --add path0 path1'
 
 mv path0 path0-
 sed -e 's/line/Line/' <path0- >path0
@@ -48,15 +49,6 @@ EOF
 
 test_expect_success \
     'validate git-diff-files -p output.' \
-    'cmp -s current expected'
-
-test_expect_success \
-    'build same diff using git-diff-helper.' \
-    'git-diff-files -z | git-diff-helper -z >current'
-
-
-test_expect_success \
-    'validate git-diff-helper output.' \
-    'cmp -s current expected'
+    'compare_diff_patch current expected'
 
 test_done

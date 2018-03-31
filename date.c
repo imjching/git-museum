@@ -4,8 +4,8 @@
  * Copyright (C) Linus Torvalds, 2005
  */
 
-#include <ctype.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "cache.h"
 
@@ -34,7 +34,7 @@ static const char *month_names[] = {
 };
 
 static const char *weekday_names[] = {
-	"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+	"Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"
 };
 
 /*
@@ -224,7 +224,7 @@ static int is_date(int year, int month, int day, struct tm *tm)
 	return 0;
 }
 
-static int match_multi_number(unsigned long num, char c, char *date, char *end, struct tm *tm)
+static int match_multi_number(unsigned long num, char c, const char *date, char *end, struct tm *tm)
 {
 	long num2, num3;
 
@@ -270,7 +270,7 @@ static int match_multi_number(unsigned long num, char c, char *date, char *end, 
 /*
  * We've seen a digit. Time? Year? Date? 
  */
-static int match_digit(char *date, struct tm *tm, int *offset, int *tm_gmt)
+static int match_digit(const char *date, struct tm *tm, int *offset, int *tm_gmt)
 {
 	int n;
 	char *end;
@@ -361,7 +361,7 @@ static int match_digit(char *date, struct tm *tm, int *offset, int *tm_gmt)
 	return n;
 }
 
-static int match_tz(char *date, int *offp)
+static int match_tz(const char *date, int *offp)
 {
 	char *end;
 	int offset = strtoul(date+1, &end, 10);
@@ -386,12 +386,23 @@ static int match_tz(char *date, int *offp)
 	return end - date;
 }
 
+static int date_string(unsigned long date, int offset, char *buf, int len)
+{
+	int sign = '+';
+
+	if (offset < 0) {
+		offset = -offset;
+		sign = '-';
+	}
+	return snprintf(buf, len, "%lu %c%02d%02d", date, sign, offset / 60, offset % 60);
+}
+
 /* Gr. strptime is crap for this; it doesn't have a way to require RFC2822
    (i.e. English) day/month names, and it doesn't work correctly with %z. */
-void parse_date(char *date, char *result, int maxlen)
+int parse_date(const char *date, char *result, int maxlen)
 {
 	struct tm tm;
-	int offset, sign, tm_gmt;
+	int offset, tm_gmt;
 	time_t then;
 
 	memset(&tm, 0, sizeof(tm));
@@ -431,18 +442,11 @@ void parse_date(char *date, char *result, int maxlen)
 		offset = (then - mktime(&tm)) / 60;
 
 	if (then == -1)
-		return;
+		return -1;
 
 	if (!tm_gmt)
 		then -= offset * 60;
-
-	sign = '+';
-	if (offset < 0) {
-		offset = -offset;
-		sign = '-';
-	}
-
-	snprintf(result, maxlen, "%lu %c%02d%02d", then, sign, offset/60, offset % 60);
+	return date_string(then, offset, result, maxlen);
 }
 
 void datestamp(char *buf, int bufsize)
@@ -455,5 +459,188 @@ void datestamp(char *buf, int bufsize)
 	offset = my_mktime(localtime(&now)) - now;
 	offset /= 60;
 
-	snprintf(buf, bufsize, "%lu %+05d", now, offset/60*100 + offset%60);
+	date_string(now, offset, buf, bufsize);
+}
+
+static void update_tm(struct tm *tm, unsigned long sec)
+{
+	time_t n = mktime(tm) - sec;
+	localtime_r(&n, tm);
+}
+
+static void date_yesterday(struct tm *tm, int *num)
+{
+	update_tm(tm, 24*60*60);
+}
+
+static void date_time(struct tm *tm, int hour)
+{
+	if (tm->tm_hour < hour)
+		date_yesterday(tm, NULL);
+	tm->tm_hour = hour;
+	tm->tm_min = 0;
+	tm->tm_sec = 0;
+}
+
+static void date_midnight(struct tm *tm, int *num)
+{
+	date_time(tm, 0);
+}
+
+static void date_noon(struct tm *tm, int *num)
+{
+	date_time(tm, 12);
+}
+
+static void date_tea(struct tm *tm, int *num)
+{
+	date_time(tm, 17);
+}
+
+static const struct special {
+	const char *name;
+	void (*fn)(struct tm *, int *);
+} special[] = {
+	{ "yesterday", date_yesterday },
+	{ "noon", date_noon },
+	{ "midnight", date_midnight },
+	{ "tea", date_tea },
+	{ NULL }
+};
+
+static const char *number_name[] = {
+	"zero", "one", "two", "three", "four",
+	"five", "six", "seven", "eight", "nine", "ten",
+};
+
+static const struct typelen {
+	const char *type;
+	int length;
+} typelen[] = {
+	{ "seconds", 1 },
+	{ "minutes", 60 },
+	{ "hours", 60*60 },
+	{ "days", 24*60*60 },
+	{ "weeks", 7*24*60*60 },
+	{ NULL }
+};	
+
+static const char *approxidate_alpha(const char *date, struct tm *tm, int *num)
+{
+	const struct typelen *tl;
+	const struct special *s;
+	const char *end = date;
+	int n = 1, i;
+
+	while (isalpha(*++end))
+		n++;
+
+	for (i = 0; i < 12; i++) {
+		int match = match_string(date, month_names[i]);
+		if (match >= 3) {
+			tm->tm_mon = i;
+			return end;
+		}
+	}
+
+	for (s = special; s->name; s++) {
+		int len = strlen(s->name);
+		if (match_string(date, s->name) == len) {
+			s->fn(tm, num);
+			return end;
+		}
+	}
+
+	if (!*num) {
+		for (i = 1; i < 11; i++) {
+			int len = strlen(number_name[i]);
+			if (match_string(date, number_name[i]) == len) {
+				*num = i;
+				return end;
+			}
+		}
+		if (match_string(date, "last") == 4)
+			*num = 1;
+		return end;
+	}
+
+	tl = typelen;
+	while (tl->type) {
+		int len = strlen(tl->type);
+		if (match_string(date, tl->type) >= len-1) {
+			update_tm(tm, tl->length * *num);
+			*num = 0;
+			return end;
+		}
+		tl++;
+	}
+
+	for (i = 0; i < 7; i++) {
+		int match = match_string(date, weekday_names[i]);
+		if (match >= 3) {
+			int diff, n = *num -1;
+			*num = 0;
+
+			diff = tm->tm_wday - i;
+			if (diff <= 0)
+				n++;
+			diff += 7*n;
+
+			update_tm(tm, diff * 24 * 60 * 60);
+			return end;
+		}
+	}
+
+	if (match_string(date, "months") >= 5) {
+		int n = tm->tm_mon - *num;
+		*num = 0;
+		while (n < 0) {
+			n += 12;
+			tm->tm_year--;
+		}
+		tm->tm_mon = n;
+		return end;
+	}
+
+	if (match_string(date, "years") >= 4) {
+		tm->tm_year -= *num;
+		*num = 0;
+		return end;
+	}
+
+	return end;
+}
+
+unsigned long approxidate(const char *date)
+{
+	int number = 0;
+	struct tm tm, now;
+	struct timeval tv;
+	char buffer[50];
+
+	if (parse_date(date, buffer, sizeof(buffer)) > 0)
+		return strtoul(buffer, NULL, 10);
+
+	gettimeofday(&tv, NULL);
+	localtime_r(&tv.tv_sec, &tm);
+	now = tm;
+	for (;;) {
+		unsigned char c = *date;
+		if (!c)
+			break;
+		date++;
+		if (isdigit(c)) {
+			char *end;
+			number = strtoul(date-1, &end, 10);
+			date = end;
+			continue;
+		}
+		if (isalpha(c))
+			date = approxidate_alpha(date-1, &tm, &number);
+	}
+	if (number > 0 && number < 32)
+		tm.tm_mday = number;
+	if (tm.tm_mon > now.tm_mon)
+		tm.tm_year--;
+	return mktime(&tm);
 }

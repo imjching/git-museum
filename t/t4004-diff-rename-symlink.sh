@@ -10,12 +10,13 @@ copy of symbolic links, but should not produce rename/copy followed
 by an edit for them.
 '
 . ./test-lib.sh
+. ../diff-lib.sh
 
 test_expect_success \
     'prepare reference tree' \
     'echo xyzzy | tr -d '\\\\'012 >yomin &&
      ln -s xyzzy frotz &&
-    git-update-cache --add frotz yomin &&
+    git-update-index --add frotz yomin &&
     tree=$(git-write-tree) &&
     echo $tree'
 
@@ -25,7 +26,7 @@ test_expect_success \
      rm -f yomin &&
      ln -s xyzzy nitfol &&
      ln -s xzzzy bozbar &&
-    git-update-cache --add --remove frotz rezrov nitfol bozbar yomin'
+    git-update-index --add --remove frotz rezrov nitfol bozbar yomin'
 
 # tree has frotz pointing at xyzzy, and yomin that contains xyzzy to
 # confuse things.  work tree has rezrov (xyzzy) nitfol (xyzzy) and
@@ -33,7 +34,7 @@ test_expect_success \
 # rezrov and nitfol are rename/copy of frotz and bozbar should be
 # a new creation.
 
-GIT_DIFF_OPTS=--unified=0 git-diff-cache -M -p $tree >current
+GIT_DIFF_OPTS=--unified=0 git-diff-index -M -p $tree >current
 cat >expected <<\EOF
 diff --git a/bozbar b/bozbar
 new file mode 120000
@@ -61,6 +62,6 @@ EOF
 
 test_expect_success \
     'validate diff output' \
-    'diff -u current expected'
+    'compare_diff_patch current expected'
 
 test_done

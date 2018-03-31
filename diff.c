@@ -10,15 +10,66 @@
 #include "diffcore.h"
 
 static const char *diff_opts = "-pu";
-static unsigned char null_sha1[20] = { 0, };
 
-static int reverse_diff;
 static int use_size_cache;
+
+int diff_rename_limit_default = -1;
+
+int git_diff_config(const char *var, const char *value)
+{
+	if (!strcmp(var, "diff.renamelimit")) {
+		diff_rename_limit_default = git_config_int(var, value);
+		return 0;
+	}
+
+	return git_default_config(var, value);
+}
+
+static char *quote_one(const char *str)
+{
+	int needlen;
+	char *xp;
+
+	if (!str)
+		return NULL;
+	needlen = quote_c_style(str, NULL, NULL, 0);
+	if (!needlen)
+		return strdup(str);
+	xp = xmalloc(needlen + 1);
+	quote_c_style(str, xp, NULL, 0);
+	return xp;
+}
+
+static char *quote_two(const char *one, const char *two)
+{
+	int need_one = quote_c_style(one, NULL, NULL, 1);
+	int need_two = quote_c_style(two, NULL, NULL, 1);
+	char *xp;
+
+	if (need_one + need_two) {
+		if (!need_one) need_one = strlen(one);
+		if (!need_two) need_one = strlen(two);
+
+		xp = xmalloc(need_one + need_two + 3);
+		xp[0] = '"';
+		quote_c_style(one, xp + 1, NULL, 1);
+		quote_c_style(two, xp + need_one + 1, NULL, 1);
+		strcpy(xp + need_one + need_two + 1, "\"");
+		return xp;
+	}
+	need_one = strlen(one);
+	need_two = strlen(two);
+	xp = xmalloc(need_one + need_two + 1);
+	strcpy(xp, one);
+	strcpy(xp + need_one, two);
+	return xp;
+}
 
 static const char *external_diff(void)
 {
 	static const char *external_diff_cmd = NULL;
 	static int done_preparing = 0;
+	const char *env_diff_opts;
 
 	if (done_preparing)
 		return external_diff_cmd;
@@ -31,21 +82,23 @@ static const char *external_diff(void)
 	 *
 	 * GIT_DIFF_OPTS="-c";
 	 */
-	if (gitenv("GIT_EXTERNAL_DIFF"))
-		external_diff_cmd = gitenv("GIT_EXTERNAL_DIFF");
+	external_diff_cmd = getenv("GIT_EXTERNAL_DIFF");
 
 	/* In case external diff fails... */
-	diff_opts = gitenv("GIT_DIFF_OPTS") ? : diff_opts;
+	env_diff_opts = getenv("GIT_DIFF_OPTS");
+	if (env_diff_opts) diff_opts = env_diff_opts;
 
 	done_preparing = 1;
 	return external_diff_cmd;
 }
 
+#define TEMPFILE_PATH_LEN		50
+
 static struct diff_tempfile {
 	const char *name; /* filename external diff should read from */
 	char hex[41];
 	char mode[10];
-	char tmp_path[50];
+	char tmp_path[TEMPFILE_PATH_LEN];
 } diff_temp[2];
 
 static int count_lines(const char *filename)
@@ -132,55 +185,52 @@ static void builtin_diff(const char *name_a,
 			 int complete_rewrite)
 {
 	int i, next_at, cmd_size;
-	const char *diff_cmd = "diff -L%s%s -L%s%s";
-	const char *diff_arg  = "%s %s||:"; /* "||:" is to return 0 */
+	const char *const diff_cmd = "diff -L%s -L%s";
+	const char *const diff_arg  = "-- %s %s||:"; /* "||:" is to return 0 */
 	const char *input_name_sq[2];
-	const char *path0[2];
-	const char *path1[2];
-	const char *name_sq[2];
+	const char *label_path[2];
 	char *cmd;
 
-	name_sq[0] = sq_quote(name_a);
-	name_sq[1] = sq_quote(name_b);
-
-	/* diff_cmd and diff_arg have 6 %s in total which makes
-	 * the sum of these strings 12 bytes larger than required.
+	/* diff_cmd and diff_arg have 4 %s in total which makes
+	 * the sum of these strings 8 bytes larger than required.
 	 * we use 2 spaces around diff-opts, and we need to count
-	 * terminating NUL, so we subtract 9 here.
+	 * terminating NUL; we used to subtract 5 here, but we do not
+	 * care about small leaks in this subprocess that is about
+	 * to exec "diff" anymore.
 	 */
-	cmd_size = (strlen(diff_cmd) + strlen(diff_opts) +
-			strlen(diff_arg) - 9);
+	cmd_size = (strlen(diff_cmd) + strlen(diff_opts) + strlen(diff_arg)
+		    + 128);
+
 	for (i = 0; i < 2; i++) {
 		input_name_sq[i] = sq_quote(temp[i].name);
-		if (!strcmp(temp[i].name, "/dev/null")) {
-			path0[i] = "/dev/null";
-			path1[i] = "";
-		} else {
-			path0[i] = i ? "b/" : "a/";
-			path1[i] = name_sq[i];
-		}
-		cmd_size += (strlen(path0[i]) + strlen(path1[i]) +
-			     strlen(input_name_sq[i]));
+		if (!strcmp(temp[i].name, "/dev/null"))
+			label_path[i] = "/dev/null";
+		else if (!i)
+			label_path[i] = sq_quote(quote_two("a/", name_a));
+		else
+			label_path[i] = sq_quote(quote_two("b/", name_b));
+		cmd_size += (strlen(label_path[i]) + strlen(input_name_sq[i]));
 	}
 
 	cmd = xmalloc(cmd_size);
 
 	next_at = 0;
 	next_at += snprintf(cmd+next_at, cmd_size-next_at,
-			    diff_cmd,
-			    path0[0], path1[0], path0[1], path1[1]);
+			    diff_cmd, label_path[0], label_path[1]);
 	next_at += snprintf(cmd+next_at, cmd_size-next_at,
 			    " %s ", diff_opts);
 	next_at += snprintf(cmd+next_at, cmd_size-next_at,
 			    diff_arg, input_name_sq[0], input_name_sq[1]);
 
-	printf("diff --git a/%s b/%s\n", name_a, name_b);
-	if (!path1[0][0]) {
+	printf("diff --git %s %s\n",
+	       quote_two("a/", name_a), quote_two("b/", name_b));
+	if (label_path[0][0] == '/') {
+		/* dev/null */
 		printf("new file mode %s\n", temp[1].mode);
 		if (xfrm_msg && xfrm_msg[0])
 			puts(xfrm_msg);
 	}
-	else if (!path1[1][0]) {
+	else if (label_path[1][0] == '/') {
 		printf("deleted file mode %s\n", temp[0].mode);
 		if (xfrm_msg && xfrm_msg[0])
 			puts(xfrm_msg);
@@ -211,14 +261,10 @@ struct diff_filespec *alloc_filespec(const char *path)
 {
 	int namelen = strlen(path);
 	struct diff_filespec *spec = xmalloc(sizeof(*spec) + namelen + 1);
+
+	memset(spec, 0, sizeof(*spec));
 	spec->path = (char *)(spec + 1);
-	strcpy(spec->path, path);
-	spec->should_free = spec->should_munmap = 0;
-	spec->xfrm_flags = 0;
-	spec->size = 0;
-	spec->data = NULL;
-	spec->mode = 0;
-	memset(spec->sha1, 0, 20);
+	memcpy(spec->path, path, namelen+1);
 	return spec;
 }
 
@@ -377,8 +423,10 @@ int diff_populate_filespec(struct diff_filespec *s, int size_only)
 		if (fd < 0)
 			goto err_empty;
 		s->data = mmap(NULL, s->size, PROT_READ, MAP_PRIVATE, fd, 0);
-		s->should_munmap = 1;
 		close(fd);
+		if (s->data == MAP_FAILED)
+			goto err_empty;
+		s->should_munmap = 1;
 	}
 	else {
 		char type[20];
@@ -414,13 +462,12 @@ void diff_free_filespec_data(struct diff_filespec *s)
 static void prep_temp_blob(struct diff_tempfile *temp,
 			   void *blob,
 			   unsigned long size,
-			   unsigned char *sha1,
+			   const unsigned char *sha1,
 			   int mode)
 {
 	int fd;
 
-	strcpy(temp->tmp_path, ".diff_XXXXXX");
-	fd = mkstemp(temp->tmp_path);
+	fd = git_mkstemp(temp->tmp_path, TEMPFILE_PATH_LEN, ".diff_XXXXXX");
 	if (fd < 0)
 		die("unable to create temp-file");
 	if (write(fd, blob, size) != size)
@@ -528,10 +575,12 @@ static void run_external_diff(const char *pgm,
 	pid_t pid;
 	int status;
 	static int atexit_asked = 0;
+	const char *othername;
 
+	othername = (other? other : name);
 	if (one && two) {
 		prepare_temp_file(name, &temp[0], one);
-		prepare_temp_file(other ? : name, &temp[1], two);
+		prepare_temp_file(othername, &temp[1], two);
 		if (! atexit_asked &&
 		    (temp[0].name == temp[0].tmp_path ||
 		     temp[1].name == temp[1].tmp_path)) {
@@ -572,7 +621,7 @@ static void run_external_diff(const char *pgm,
 		 * otherwise we use the built-in one.
 		 */
 		if (one && two)
-			builtin_diff(name, other ? : name, temp, xfrm_msg,
+			builtin_diff(name, othername, temp, xfrm_msg,
 				     complete_rewrite);
 		else
 			printf("* Unmerged path %s\n", name);
@@ -596,15 +645,32 @@ static void run_external_diff(const char *pgm,
 	remove_tempfile();
 }
 
-static void run_diff(struct diff_filepair *p)
+static void diff_fill_sha1_info(struct diff_filespec *one)
+{
+	if (DIFF_FILE_VALID(one)) {
+		if (!one->sha1_valid) {
+			struct stat st;
+			if (stat(one->path, &st) < 0)
+				die("stat %s", one->path);
+			if (index_path(one->sha1, one->path, &st, 0))
+				die("cannot hash %s\n", one->path);
+		}
+	}
+	else
+		memset(one->sha1, 0, 20);
+}
+
+static void run_diff(struct diff_filepair *p, struct diff_options *o)
 {
 	const char *pgm = external_diff();
-	char msg_[PATH_MAX*2+200], *xfrm_msg;
+	char msg[PATH_MAX*2+300], *xfrm_msg;
 	struct diff_filespec *one;
 	struct diff_filespec *two;
 	const char *name;
 	const char *other;
+	char *name_munged, *other_munged;
 	int complete_rewrite = 0;
+	int len;
 
 	if (DIFF_PAIR_UNMERGED(p)) {
 		/* unmerged */
@@ -615,39 +681,64 @@ static void run_diff(struct diff_filepair *p)
 
 	name = p->one->path;
 	other = (strcmp(name, p->two->path) ? p->two->path : NULL);
+	name_munged = quote_one(name);
+	other_munged = quote_one(other);
 	one = p->one; two = p->two;
+
+	diff_fill_sha1_info(one);
+	diff_fill_sha1_info(two);
+
+	len = 0;
 	switch (p->status) {
-	case 'C':
-		sprintf(msg_,
-			"similarity index %d%%\n"
-			"copy from %s\n"
-			"copy to %s",
-			(int)(0.5 + p->score * 100.0/MAX_SCORE),
-			name, other);
-		xfrm_msg = msg_;
+	case DIFF_STATUS_COPIED:
+		len += snprintf(msg + len, sizeof(msg) - len,
+				"similarity index %d%%\n"
+				"copy from %s\n"
+				"copy to %s\n",
+				(int)(0.5 + p->score * 100.0/MAX_SCORE),
+				name_munged, other_munged);
 		break;
-	case 'R':
-		sprintf(msg_,
-			"similarity index %d%%\n"
-			"rename from %s\n"
-			"rename to %s",
-			(int)(0.5 + p->score * 100.0/MAX_SCORE),
-			name, other);
-		xfrm_msg = msg_;
+	case DIFF_STATUS_RENAMED:
+		len += snprintf(msg + len, sizeof(msg) - len,
+				"similarity index %d%%\n"
+				"rename from %s\n"
+				"rename to %s\n",
+				(int)(0.5 + p->score * 100.0/MAX_SCORE),
+				name_munged, other_munged);
 		break;
-	case 'M':
+	case DIFF_STATUS_MODIFIED:
 		if (p->score) {
-			sprintf(msg_,
-				"dissimilarity index %d%%",
-				(int)(0.5 + p->score * 100.0/MAX_SCORE));
-			xfrm_msg = msg_;
+			len += snprintf(msg + len, sizeof(msg) - len,
+					"dissimilarity index %d%%\n",
+					(int)(0.5 + p->score *
+					      100.0/MAX_SCORE));
 			complete_rewrite = 1;
 			break;
 		}
 		/* fallthru */
 	default:
-		xfrm_msg = NULL;
+		/* nothing */
+		;
 	}
+
+	if (memcmp(one->sha1, two->sha1, 20)) {
+		char one_sha1[41];
+		int abbrev = o->full_index ? 40 : DIFF_DEFAULT_INDEX_ABBREV;
+		memcpy(one_sha1, sha1_to_hex(one->sha1), 41);
+
+		len += snprintf(msg + len, sizeof(msg) - len,
+				"index %.*s..%.*s",
+				abbrev, one_sha1, abbrev,
+				sha1_to_hex(two->sha1));
+		if (one->mode == two->mode)
+			len += snprintf(msg + len, sizeof(msg) - len,
+					" %06o", one->mode);
+		len += snprintf(msg + len, sizeof(msg) - len, "\n");
+	}
+
+	if (len)
+		msg[--len] = 0;
+	xfrm_msg = len ? msg : NULL;
 
 	if (!pgm &&
 	    DIFF_FILE_VALID(one) && DIFF_FILE_VALID(two) &&
@@ -665,13 +756,32 @@ static void run_diff(struct diff_filepair *p)
 	else
 		run_external_diff(pgm, name, other, one, two, xfrm_msg,
 				  complete_rewrite);
+
+	free(name_munged);
+	free(other_munged);
 }
 
-void diff_setup(int flags)
+void diff_setup(struct diff_options *options)
 {
-	if (flags & DIFF_SETUP_REVERSE)
-		reverse_diff = 1;
-	if (flags & DIFF_SETUP_USE_CACHE) {
+	memset(options, 0, sizeof(*options));
+	options->output_format = DIFF_FORMAT_RAW;
+	options->line_termination = '\n';
+	options->break_opt = -1;
+	options->rename_limit = -1;
+
+	options->change = diff_change;
+	options->add_remove = diff_addremove;
+}
+
+int diff_setup_done(struct diff_options *options)
+{
+	if ((options->find_copies_harder &&
+	     options->detect_rename != DIFF_DETECT_COPY) ||
+	    (0 <= options->rename_limit && !options->detect_rename))
+		return -1;
+	if (options->detect_rename && options->rename_limit < 0)
+		options->rename_limit = diff_rename_limit_default;
+	if (options->setup & DIFF_SETUP_USE_CACHE) {
 		if (!active_cache)
 			/* read-cache does not die even when it fails
 			 * so it is safe for us to do this here.  Also
@@ -681,32 +791,103 @@ void diff_setup(int flags)
 			 */
 			read_cache();
 	}
-	if (flags & DIFF_SETUP_USE_SIZE_CACHE)
+	if (options->setup & DIFF_SETUP_USE_SIZE_CACHE)
 		use_size_cache = 1;
-	
+	if (options->abbrev <= 0 || 40 < options->abbrev)
+		options->abbrev = 40; /* full */
+
+	return 0;
+}
+
+int diff_opt_parse(struct diff_options *options, const char **av, int ac)
+{
+	const char *arg = av[0];
+	if (!strcmp(arg, "-p") || !strcmp(arg, "-u"))
+		options->output_format = DIFF_FORMAT_PATCH;
+	else if (!strcmp(arg, "-z"))
+		options->line_termination = 0;
+	else if (!strncmp(arg, "-l", 2))
+		options->rename_limit = strtoul(arg+2, NULL, 10);
+	else if (!strcmp(arg, "--full-index"))
+		options->full_index = 1;
+	else if (!strcmp(arg, "--name-only"))
+		options->output_format = DIFF_FORMAT_NAME;
+	else if (!strcmp(arg, "--name-status"))
+		options->output_format = DIFF_FORMAT_NAME_STATUS;
+	else if (!strcmp(arg, "-R"))
+		options->reverse_diff = 1;
+	else if (!strncmp(arg, "-S", 2))
+		options->pickaxe = arg + 2;
+	else if (!strcmp(arg, "-s"))
+		options->output_format = DIFF_FORMAT_NO_OUTPUT;
+	else if (!strncmp(arg, "-O", 2))
+		options->orderfile = arg + 2;
+	else if (!strncmp(arg, "--diff-filter=", 14))
+		options->filter = arg + 14;
+	else if (!strcmp(arg, "--pickaxe-all"))
+		options->pickaxe_opts = DIFF_PICKAXE_ALL;
+	else if (!strncmp(arg, "-B", 2)) {
+		if ((options->break_opt =
+		     diff_scoreopt_parse(arg)) == -1)
+			return -1;
+	}
+	else if (!strncmp(arg, "-M", 2)) {
+		if ((options->rename_score =
+		     diff_scoreopt_parse(arg)) == -1)
+			return -1;
+		options->detect_rename = DIFF_DETECT_RENAME;
+	}
+	else if (!strncmp(arg, "-C", 2)) {
+		if ((options->rename_score =
+		     diff_scoreopt_parse(arg)) == -1)
+			return -1;
+		options->detect_rename = DIFF_DETECT_COPY;
+	}
+	else if (!strcmp(arg, "--find-copies-harder"))
+		options->find_copies_harder = 1;
+	else if (!strcmp(arg, "--abbrev"))
+		options->abbrev = DIFF_DEFAULT_ABBREV;
+	else if (!strncmp(arg, "--abbrev=", 9))
+		options->abbrev = strtoul(arg + 9, NULL, 10);
+	else
+		return 0;
+	return 1;
 }
 
 static int parse_num(const char **cp_p)
 {
-	int num, scale, ch, cnt;
+	unsigned long num, scale;
+	int ch, dot;
 	const char *cp = *cp_p;
 
-	cnt = num = 0;
+	num = 0;
 	scale = 1;
-	while ('0' <= (ch = *cp) && ch <= '9') {
-		if (cnt++ < 5) {
-			/* We simply ignore more than 5 digits precision. */
-			scale *= 10;
-			num = num * 10 + ch - '0';
+	dot = 0;
+	for(;;) {
+		ch = *cp;
+		if ( !dot && ch == '.' ) {
+			scale = 1;
+			dot = 1;
+		} else if ( ch == '%' ) {
+			scale = dot ? scale*100 : 100;
+			cp++;	/* % is always at the end */
+			break;
+		} else if ( ch >= '0' && ch <= '9' ) {
+			if ( scale < 100000 ) {
+				scale *= 10;
+				num = (num*10) + (ch-'0');
+			}
+		} else {
+			break;
 		}
-		*cp++;
+		cp++;
 	}
 	*cp_p = cp;
 
 	/* user says num divided by scale and we say internally that
 	 * is MAX_SCORE * num / scale.
 	 */
-	return (MAX_SCORE * num / scale);
+	return (num >= scale) ? MAX_SCORE : (MAX_SCORE * num / scale);
 }
 
 int diff_scoreopt_parse(const char *opt)
@@ -760,7 +941,8 @@ struct diff_filepair *diff_queue(struct diff_queue_struct *queue,
 	dp->status = 0;
 	dp->source_stays = 0;
 	dp->broken_pair = 0;
-	diff_q(queue, dp);
+	if (queue)
+		diff_q(queue, dp);
 	return dp;
 }
 
@@ -768,24 +950,60 @@ void diff_free_filepair(struct diff_filepair *p)
 {
 	diff_free_filespec_data(p->one);
 	diff_free_filespec_data(p->two);
+	free(p->one);
+	free(p->two);
 	free(p);
+}
+
+/* This is different from find_unique_abbrev() in that
+ * it needs to deal with 0{40} SHA1.
+ */
+const char *diff_unique_abbrev(const unsigned char *sha1, int len)
+{
+	int abblen;
+	const char *abbrev;
+	if (len == 40)
+		return sha1_to_hex(sha1);
+
+	abbrev = find_unique_abbrev(sha1, len);
+	if (!abbrev) {
+		if (!memcmp(sha1, null_sha1, 20)) {
+			char *buf = sha1_to_hex(null_sha1);
+			if (len < 37)
+				strcpy(buf + len, "...");
+			return buf;
+		}
+		else 
+			return sha1_to_hex(sha1);
+	}
+	abblen = strlen(abbrev);
+	if (abblen < 37) {
+		static char hex[41];
+		if (len < abblen && abblen <= len + 2)
+			sprintf(hex, "%s%.*s", abbrev, len+3-abblen, "..");
+		else
+			sprintf(hex, "%s...", abbrev);
+		return hex;
+	}
+	return sha1_to_hex(sha1);
 }
 
 static void diff_flush_raw(struct diff_filepair *p,
 			   int line_termination,
-			   int inter_name_termination)
+			   int inter_name_termination,
+			   struct diff_options *options)
 {
 	int two_paths;
 	char status[10];
+	int abbrev = options->abbrev;
+	const char *path_one, *path_two;
+	int output_format = options->output_format;
 
+	path_one = p->one->path;
+	path_two = p->two->path;
 	if (line_termination) {
-		const char *err = "path %s cannot be expressed without -z";
-		if (strchr(p->one->path, line_termination) ||
-		    strchr(p->one->path, inter_name_termination))
-			die(err, p->one->path);
-		if (strchr(p->two->path, line_termination) ||
-		    strchr(p->two->path, inter_name_termination))
-			die(err, p->two->path);
+		path_one = quote_one(path_one);
+		path_two = quote_one(path_two);
 	}
 
 	if (p->score)
@@ -796,26 +1014,48 @@ static void diff_flush_raw(struct diff_filepair *p,
 		status[1] = 0;
 	}
 	switch (p->status) {
-	case 'C': case 'R':
+	case DIFF_STATUS_COPIED:
+	case DIFF_STATUS_RENAMED:
 		two_paths = 1;
 		break;
-	case 'N': case 'D':
+	case DIFF_STATUS_ADDED:
+	case DIFF_STATUS_DELETED:
 		two_paths = 0;
 		break;
 	default:
 		two_paths = 0;
 		break;
 	}
-	printf(":%06o %06o %s ",
-	       p->one->mode, p->two->mode, sha1_to_hex(p->one->sha1));
-	printf("%s %s%c%s",
-	       sha1_to_hex(p->two->sha1),
-	       status,
-	       inter_name_termination,
-	       p->one->path);
+	if (output_format != DIFF_FORMAT_NAME_STATUS) {
+		printf(":%06o %06o %s ",
+		       p->one->mode, p->two->mode,
+		       diff_unique_abbrev(p->one->sha1, abbrev));
+		printf("%s ",
+		       diff_unique_abbrev(p->two->sha1, abbrev));
+	}
+	printf("%s%c%s", status, inter_name_termination, path_one);
 	if (two_paths)
-		printf("%c%s", inter_name_termination, p->two->path);
+		printf("%c%s", inter_name_termination, path_two);
 	putchar(line_termination);
+	if (path_one != p->one->path)
+		free((void*)path_one);
+	if (path_two != p->two->path)
+		free((void*)path_two);
+}
+
+static void diff_flush_name(struct diff_filepair *p,
+			    int inter_name_termination,
+			    int line_termination)
+{
+	char *path = p->two->path;
+
+	if (line_termination)
+		path = quote_one(p->two->path);
+	else
+		path = p->two->path;
+	printf("%s%c", path, line_termination);
+	if (p->two->path != path)
+		free(path);
 }
 
 int diff_unmodified_pair(struct diff_filepair *p)
@@ -852,7 +1092,7 @@ int diff_unmodified_pair(struct diff_filepair *p)
 	return 0;
 }
 
-static void diff_flush_patch(struct diff_filepair *p)
+static void diff_flush_patch(struct diff_filepair *p, struct diff_options *o)
 {
 	if (diff_unmodified_pair(p))
 		return;
@@ -861,7 +1101,7 @@ static void diff_flush_patch(struct diff_filepair *p)
 	    (DIFF_FILE_VALID(p->two) && S_ISDIR(p->two->mode)))
 		return; /* no tree diffs in patch format */ 
 
-	run_diff(p);
+	run_diff(p, o);
 }
 
 int diff_queue_is_empty(void)
@@ -878,13 +1118,13 @@ int diff_queue_is_empty(void)
 void diff_debug_filespec(struct diff_filespec *s, int x, const char *one)
 {
 	fprintf(stderr, "queue[%d] %s (%s) %s %06o %s\n",
-		x, one ? : "",
+		x, one ? one : "",
 		s->path,
 		DIFF_FILE_VALID(s) ? "valid" : "invalid",
 		s->mode,
 		s->sha1_valid ? sha1_to_hex(s->sha1) : "");
 	fprintf(stderr, "queue[%d] %s size %lu flags %d\n",
-		x, one ? : "",
+		x, one ? one : "",
 		s->size, s->xfrm_flags);
 }
 
@@ -893,7 +1133,7 @@ void diff_debug_filepair(const struct diff_filepair *p, int i)
 	diff_debug_filespec(p->one, i, "one");
 	diff_debug_filespec(p->two, i, "two");
 	fprintf(stderr, "score %d, status %c stays %d broken %d\n",
-		p->score, p->status ? : '?',
+		p->score, p->status ? p->status : '?',
 		p->source_stays, p->broken_pair);
 }
 
@@ -922,13 +1162,13 @@ static void diff_resolve_rename_copy(void)
 		p = q->queue[i];
 		p->status = 0; /* undecided */
 		if (DIFF_PAIR_UNMERGED(p))
-			p->status = 'U';
+			p->status = DIFF_STATUS_UNMERGED;
 		else if (!DIFF_FILE_VALID(p->one))
-			p->status = 'N';
+			p->status = DIFF_STATUS_ADDED;
 		else if (!DIFF_FILE_VALID(p->two))
-			p->status = 'D';
+			p->status = DIFF_STATUS_DELETED;
 		else if (DIFF_PAIR_TYPE_CHANGED(p))
-			p->status = 'T';
+			p->status = DIFF_STATUS_TYPE_CHANGED;
 
 		/* from this point on, we are dealing with a pair
 		 * whose both sides are valid and of the same type, i.e.
@@ -936,12 +1176,14 @@ static void diff_resolve_rename_copy(void)
 		 */
 		else if (DIFF_PAIR_RENAME(p)) {
 			if (p->source_stays) {
-				p->status = 'C';
+				p->status = DIFF_STATUS_COPIED;
 				continue;
 			}
 			/* See if there is some other filepair that
 			 * copies from the same source as us.  If so
-			 * we are a copy.  Otherwise we are a rename.
+			 * we are a copy.  Otherwise we are either a
+			 * copy if the path stays, or a rename if it
+			 * does not, but we already handled "stays" case.
 			 */
 			for (j = i + 1; j < q->nr; j++) {
 				pp = q->queue[j];
@@ -950,57 +1192,63 @@ static void diff_resolve_rename_copy(void)
 				if (!DIFF_PAIR_RENAME(pp))
 					continue; /* not a rename/copy */
 				/* pp is a rename/copy from the same source */
-				p->status = 'C';
+				p->status = DIFF_STATUS_COPIED;
 				break;
 			}
 			if (!p->status)
-				p->status = 'R';
+				p->status = DIFF_STATUS_RENAMED;
 		}
 		else if (memcmp(p->one->sha1, p->two->sha1, 20) ||
 			 p->one->mode != p->two->mode)
-			p->status = 'M';
+			p->status = DIFF_STATUS_MODIFIED;
 		else {
 			/* This is a "no-change" entry and should not
 			 * happen anymore, but prepare for broken callers.
 			 */
 			error("feeding unmodified %s to diffcore",
 			      p->one->path);
-			p->status = 'X';
+			p->status = DIFF_STATUS_UNKNOWN;
 		}
 	}
 	diff_debug_queue("resolve-rename-copy done", q);
 }
 
-void diff_flush(int diff_output_style)
+void diff_flush(struct diff_options *options)
 {
 	struct diff_queue_struct *q = &diff_queued_diff;
 	int i;
-	int line_termination = '\n';
 	int inter_name_termination = '\t';
+	int diff_output_format = options->output_format;
+	int line_termination = options->line_termination;
 
-	if (diff_output_style == DIFF_FORMAT_MACHINE)
-		line_termination = inter_name_termination = 0;
+	if (!line_termination)
+		inter_name_termination = 0;
 
 	for (i = 0; i < q->nr; i++) {
 		struct diff_filepair *p = q->queue[i];
-		if ((diff_output_style == DIFF_FORMAT_NO_OUTPUT) ||
-		    (p->status == 'X'))
+		if ((diff_output_format == DIFF_FORMAT_NO_OUTPUT) ||
+		    (p->status == DIFF_STATUS_UNKNOWN))
 			continue;
 		if (p->status == 0)
 			die("internal error in diff-resolve-rename-copy");
-		switch (diff_output_style) {
+		switch (diff_output_format) {
 		case DIFF_FORMAT_PATCH:
-			diff_flush_patch(p);
+			diff_flush_patch(p, options);
 			break;
-		case DIFF_FORMAT_HUMAN:
-		case DIFF_FORMAT_MACHINE:
+		case DIFF_FORMAT_RAW:
+		case DIFF_FORMAT_NAME_STATUS:
 			diff_flush_raw(p, line_termination,
-				       inter_name_termination);
+				       inter_name_termination,
+				       options);
+			break;
+		case DIFF_FORMAT_NAME:
+			diff_flush_name(p,
+					inter_name_termination,
+					line_termination);
 			break;
 		}
-	}
-	for (i = 0; i < q->nr; i++)
 		diff_free_filepair(q->queue[i]);
+	}
 	free(q->queue);
 	q->queue = NULL;
 	q->nr = q->alloc = 0;
@@ -1017,15 +1265,17 @@ static void diffcore_apply_filter(const char *filter)
 	if (!filter)
 		return;
 
-	if (strchr(filter, 'A')) {
-		/* All-or-none */
+	if (strchr(filter, DIFF_STATUS_FILTER_AON)) {
 		int found;
 		for (i = found = 0; !found && i < q->nr; i++) {
 			struct diff_filepair *p = q->queue[i];
-			if (((p->status == 'M') &&
-			     ((p->score && strchr(filter, 'B')) ||
-			      (!p->score && strchr(filter, 'M')))) ||
-			    ((p->status != 'M') && strchr(filter, p->status)))
+			if (((p->status == DIFF_STATUS_MODIFIED) &&
+			     ((p->score &&
+			       strchr(filter, DIFF_STATUS_FILTER_BROKEN)) ||
+			      (!p->score &&
+			       strchr(filter, DIFF_STATUS_MODIFIED)))) ||
+			    ((p->status != DIFF_STATUS_MODIFIED) &&
+			     strchr(filter, p->status)))
 				found++;
 		}
 		if (found)
@@ -1043,10 +1293,14 @@ static void diffcore_apply_filter(const char *filter)
 		/* Only the matching ones */
 		for (i = 0; i < q->nr; i++) {
 			struct diff_filepair *p = q->queue[i];
-			if (((p->status == 'M') &&
-			     ((p->score && strchr(filter, 'B')) ||
-			      (!p->score && strchr(filter, 'M')))) ||
-			    ((p->status != 'M') && strchr(filter, p->status)))
+
+			if (((p->status == DIFF_STATUS_MODIFIED) &&
+			     ((p->score &&
+			       strchr(filter, DIFF_STATUS_FILTER_BROKEN)) ||
+			      (!p->score &&
+			       strchr(filter, DIFF_STATUS_MODIFIED)))) ||
+			    ((p->status != DIFF_STATUS_MODIFIED) &&
+			     strchr(filter, p->status)))
 				diff_q(&outq, p);
 			else
 				diff_free_filepair(p);
@@ -1056,45 +1310,36 @@ static void diffcore_apply_filter(const char *filter)
 	*q = outq;
 }
 
-void diffcore_std(const char **paths,
-		  int detect_rename, int rename_score,
-		  const char *pickaxe, int pickaxe_opts,
-		  int break_opt,
-		  const char *orderfile,
-		  const char *filter)
+void diffcore_std(struct diff_options *options)
 {
-	if (paths && paths[0])
-		diffcore_pathspec(paths);
-	if (break_opt != -1)
-		diffcore_break(break_opt);
-	if (detect_rename)
-		diffcore_rename(detect_rename, rename_score);
-	if (break_opt != -1)
+	if (options->paths && options->paths[0])
+		diffcore_pathspec(options->paths);
+	if (options->break_opt != -1)
+		diffcore_break(options->break_opt);
+	if (options->detect_rename)
+		diffcore_rename(options);
+	if (options->break_opt != -1)
 		diffcore_merge_broken();
-	if (pickaxe)
-		diffcore_pickaxe(pickaxe, pickaxe_opts);
-	if (orderfile)
-		diffcore_order(orderfile);
+	if (options->pickaxe)
+		diffcore_pickaxe(options->pickaxe, options->pickaxe_opts);
+	if (options->orderfile)
+		diffcore_order(options->orderfile);
 	diff_resolve_rename_copy();
-	diffcore_apply_filter(filter);
+	diffcore_apply_filter(options->filter);
 }
 
 
-void diffcore_std_no_resolve(const char **paths,
-			     const char *pickaxe, int pickaxe_opts,
-			     const char *orderfile,
-			     const char *filter)
+void diffcore_std_no_resolve(struct diff_options *options)
 {
-	if (paths && paths[0])
-		diffcore_pathspec(paths);
-	if (pickaxe)
-		diffcore_pickaxe(pickaxe, pickaxe_opts);
-	if (orderfile)
-		diffcore_order(orderfile);
-	diffcore_apply_filter(filter);
+	if (options->pickaxe)
+		diffcore_pickaxe(options->pickaxe, options->pickaxe_opts);
+	if (options->orderfile)
+		diffcore_order(options->orderfile);
+	diffcore_apply_filter(options->filter);
 }
 
-void diff_addremove(int addremove, unsigned mode,
+void diff_addremove(struct diff_options *options,
+		    int addremove, unsigned mode,
 		    const unsigned char *sha1,
 		    const char *base, const char *path)
 {
@@ -1113,7 +1358,7 @@ void diff_addremove(int addremove, unsigned mode,
 	 * Before the final output happens, they are pruned after
 	 * merged into rename/copy pairs as appropriate.
 	 */
-	if (reverse_diff)
+	if (options->reverse_diff)
 		addremove = (addremove == '+' ? '-' :
 			     addremove == '-' ? '+' : addremove);
 
@@ -1130,30 +1375,8 @@ void diff_addremove(int addremove, unsigned mode,
 	diff_queue(&diff_queued_diff, one, two);
 }
 
-void diff_helper_input(unsigned old_mode,
-		       unsigned new_mode,
-		       const unsigned char *old_sha1,
-		       const unsigned char *new_sha1,
-		       const char *old_path,
-		       int status,
-		       int score,
-		       const char *new_path)
-{
-	struct diff_filespec *one, *two;
-	struct diff_filepair *dp;
-
-	one = alloc_filespec(old_path);
-	two = alloc_filespec(new_path);
-	if (old_mode)
-		fill_filespec(one, old_sha1, old_mode);
-	if (new_mode)
-		fill_filespec(two, new_sha1, new_mode);
-	dp = diff_queue(&diff_queued_diff, one, two);
-	dp->score = score * MAX_SCORE / 100;
-	dp->status = status;
-}
-
-void diff_change(unsigned old_mode, unsigned new_mode,
+void diff_change(struct diff_options *options,
+		 unsigned old_mode, unsigned new_mode,
 		 const unsigned char *old_sha1,
 		 const unsigned char *new_sha1,
 		 const char *base, const char *path) 
@@ -1161,7 +1384,7 @@ void diff_change(unsigned old_mode, unsigned new_mode,
 	char concatpath[PATH_MAX];
 	struct diff_filespec *one, *two;
 
-	if (reverse_diff) {
+	if (options->reverse_diff) {
 		unsigned tmp;
 		const unsigned char *tmp_c;
 		tmp = old_mode; old_mode = new_mode; new_mode = tmp;
@@ -1177,7 +1400,8 @@ void diff_change(unsigned old_mode, unsigned new_mode,
 	diff_queue(&diff_queued_diff, one, two);
 }
 
-void diff_unmerge(const char *path)
+void diff_unmerge(struct diff_options *options,
+		  const char *path)
 {
 	struct diff_filespec *one, *two;
 	one = alloc_filespec(path);

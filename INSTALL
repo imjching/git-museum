@@ -5,10 +5,13 @@ Normally you can just do "make" followed by "make install", and that
 will install the git programs in your own ~/bin/ directory.  If you want
 to do a global install, you can do
 
-	make prefix=/usr install
+	$ make prefix=/usr ;# as yourself
+	# make prefix=/usr install ;# as root
 
-(or prefix=/usr/local, of course).  Some day somebody may send me a RPM
-spec file or something, and you can do "make rpm" or whatever.
+(or prefix=/usr/local, of course).  Just like any program suite
+that uses $prefix, the built results have some paths encoded,
+which are derived from $prefix, so "make all; make prefix=/usr
+install" would not work.
 
 Issues of note:
 
@@ -18,7 +21,7 @@ Issues of note:
    Tough.  Either don't use the wrapper script, or delete the old GNU
    interactive tools.  None of the core git stuff needs the wrapper,
    it's just a convenient shorthand and while it is documented in some
-   places, you can always replace "git commit" with "git-commit-script"
+   places, you can always replace "git commit" with "git-commit"
    instead. 
 
    But let's face it, most of us don't have GNU interactive tools, and
@@ -41,8 +44,13 @@ Issues of note:
 	  can avoid the bignum support by excising git-rev-list support
 	  for "--merge-order" (by hand).
 
-	- "libcurl".  git-http-pull uses this.  You can disable building of
-	  that program if you just want to get started. 
+	- "libcurl" and "curl" executable.  git-http-fetch and
+	  git-fetch use them.  If you do not use http
+	  transfer, you are probabaly OK if you do not have
+	  them.
+
+	- expat library; git-http-push uses it for remote lock
+	  management over DAV.  Similar to "curl" above, this is optional.
 
 	- "GNU diff" to generate patches.  Of course, you don't _have_ to
 	  generate patches if you don't want to, but let's face it, you'll
@@ -62,3 +70,23 @@ Issues of note:
 	  You'll only need the merge program if you do development using
 	  git, and if you only use git to track other peoples work you'll
 	  never notice the lack of it. 
+
+        - "wish", the TCL/Tk windowing shell is used in gitk to show the
+          history graphically
+
+	- "ssh" is used to push and pull over the net
+
+	- "perl" and POSIX-compliant shells are needed to use most of
+	  the barebone Porcelainish scripts.
+
+	- "python" 2.3 or more recent; if you have 2.3, you may need
+          to build with "make WITH_OWN_SUBPROCESS_PY=YesPlease".
+
+ - Some platform specific issues are dealt with Makefile rules,
+   but depending on your specific installation, you may not
+   have all the libraries/tools needed, or you may have
+   necessary libraries at unusual locations.  Please look at the
+   top of the Makefile to see what can be adjusted for your needs.
+   You can place local settings in config.mak and the Makefile
+   will include them.  Note that config.mak is not distributed;
+   the name is reserved for local settings.

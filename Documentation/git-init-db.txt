@@ -1,29 +1,51 @@
 git-init-db(1)
 ==============
-v0.1, May 2005
 
 NAME
 ----
-git-init-db - Creates an empty git object database
+git-init-db - Creates an empty git repository
 
 
 SYNOPSIS
 --------
-'git-init-db'
+'git-init-db' [--template=<template_directory>]
+
+
+OPTIONS
+-------
+--template=<template_directory>::
+	Provide the directory in from which templates will be used.
+
 
 DESCRIPTION
 -----------
-This simply creates an empty git object database - basically a `.git`
-directory and `.git/object/??/` directories.
+This simply creates an empty git repository - basically a `.git` directory
+and `.git/object/??/`, `.git/refs/heads` and `.git/refs/tags` directories,
+and links `.git/HEAD` symbolically to `.git/refs/heads/master`.
 
-If the 'GIT_DIR' environment variable is set then it specifies a path
+If the `$GIT_DIR` environment variable is set then it specifies a path
 to use instead of `./.git` for the base of the repository.
 
-If the object storage directory is specified via the 'GIT_OBJECT_DIRECTORY'
+If the object storage directory is specified via the `$GIT_OBJECT_DIRECTORY`
 environment variable then the sha1 directories are created underneath -
-otherwise the default `.git/objects` directory is used.
+otherwise the default `$GIT_DIR/objects` directory is used.
 
-"git-init-db" won't hurt an existing repository.
+`git-init-db` won't hurt an existing repository.
+
+
+EXAMPLES
+--------
+
+Start a new git repository for an existing code base::
++
+----------------
+$ cd /path/to/my/codebase
+$ git-init-db <1>
+$ git-add . <2>
+
+<1> prepare /path/to/my/codebase/.git directory
+<2> add all existing file to the index
+----------------
 
 
 Author
@@ -36,5 +58,5 @@ Documentation by David Greaves, Junio C Hamano and the git-list <git@vger.kernel
 
 GIT
 ---
-Part of the link:git.html[git] suite
+Part of the gitlink:git[7] suite
 

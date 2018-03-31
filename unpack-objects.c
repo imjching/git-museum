@@ -6,7 +6,7 @@
 #include <sys/time.h>
 
 static int dry_run, quiet;
-static const char unpack_usage[] = "git-unpack-objects < pack-file";
+static const char unpack_usage[] = "git-unpack-objects [-n] [-q] < pack-file";
 
 /* We always read in 4kB chunks. */
 static unsigned char buffer[4096];
@@ -31,12 +31,10 @@ static void * fill(int min)
 		offset = 0;
 	}
 	do {
-		int ret = read(0, buffer + len, sizeof(buffer) - len);
+		int ret = xread(0, buffer + len, sizeof(buffer) - len);
 		if (ret <= 0) {
 			if (!ret)
 				die("early EOF");
-			if (errno == EAGAIN || errno == EINTR)
-				continue;
 			die("read error on input: %s", strerror(errno));
 		}
 		len += ret;
@@ -75,6 +73,7 @@ static void *get_data(unsigned long size)
 		stream.next_in = fill(1);
 		stream.avail_in = len;
 	}
+	inflateEnd(&stream);
 	return buf;
 }
 
@@ -167,6 +166,7 @@ static int unpack_delta_entry(unsigned long delta_size)
 	unsigned long base_size;
 	char type[20];
 	unsigned char base_sha1[20];
+	int result;
 
 	memcpy(base_sha1, fill(20), 20);
 	use(20);
@@ -184,7 +184,9 @@ static int unpack_delta_entry(unsigned long delta_size)
 	base = read_sha1_file(base_sha1, type, &base_size);
 	if (!base)
 		die("failed to read delta-pack base object %s", sha1_to_hex(base_sha1));
-	return resolve_delta(type, base, base_size, delta_data, delta_size);
+	result = resolve_delta(type, base, base_size, delta_data, delta_size);
+	free(base);
+	return result;
 }
 
 static void unpack_one(unsigned nr, unsigned total)
@@ -265,6 +267,8 @@ int main(int argc, char **argv)
 	int i;
 	unsigned char sha1[20];
 
+	setup_git_directory();
+
 	for (i = 1 ; i < argc; i++) {
 		const char *arg = argv[i];
 
@@ -293,14 +297,9 @@ int main(int argc, char **argv)
 
 	/* Write the last part of the buffer to stdout */
 	while (len) {
-		int ret = write(1, buffer + offset, len);
-		if (!ret)
+		int ret = xwrite(1, buffer + offset, len);
+		if (ret <= 0)
 			break;
-		if (ret < 0) {
-			if (errno == EAGAIN || errno == EINTR)
-				continue;
-			break;
-		}
 		len -= ret;
 		offset += ret;
 	}

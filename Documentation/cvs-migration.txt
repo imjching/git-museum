@@ -1,4 +1,4 @@
-Git for CVS users
+git for CVS users
 =================
 
 Ok, so you're a CVS user. That's ok, it's a treatable condition, and the
@@ -7,32 +7,33 @@ you are reading this file means that you may be well on that path
 already.
 
 The thing about CVS is that it absolutely sucks as a source control
-manager, and you'll thus be happy with almost anything else. Git,
-however, may be a bit _too_ different (read: "good") for your taste, and
+manager, and you'll thus be happy with almost anything else. git,
+however, may be a bit 'too' different (read: "good") for your taste, and
 does a lot of things differently. 
 
 One particular suckage of CVS is very hard to work around: CVS is
-basically a tool for tracking _file_ history, while git is a tool for
-tracking _project_ history.  This sometimes causes problems if you are
+basically a tool for tracking 'file' history, while git is a tool for
+tracking 'project' history.  This sometimes causes problems if you are
 used to doing very strange things in CVS, in particular if you're doing
-things like making branches of just a subset of the project.  Git can't
+things like making branches of just a subset of the project.  git can't
 track that, since git never tracks things on the level of an individual
 file, only on the whole project level. 
 
 The good news is that most people don't do that, and in fact most sane
 people think it's a bug in CVS that makes it tag (and check in changes)
 one file at a time.  So most projects you'll ever see will use CVS
-_as_if_ it was sane.  In which case you'll find it very easy indeed to
-move over to Git. 
+'as if' it was sane.  In which case you'll find it very easy indeed to
+move over to git. 
 
-First off: this is not a git tutorial. See Documentation/tutorial.txt
-for how git actually works. This is more of a random collection of
-gotcha's and notes on converting from CVS to git.
+First off: this is not a git tutorial. See
+link:tutorial.html[Documentation/tutorial.txt] for how git
+actually works. This is more of a random collection of gotcha's
+and notes on converting from CVS to git.
 
 Second: CVS has the notion of a "repository" as opposed to the thing
 that you're actually working in (your working directory, or your
-"checked out tree").  Git does not have that notion at all, and all git
-working directories _are_ the repositories.  However, you can easily
+"checked out tree").  git does not have that notion at all, and all git
+working directories 'are' the repositories.  However, you can easily
 emulate the CVS model by having one special "global repository", which
 people can synchronize with.  See details later, but in the meantime
 just keep in mind that with git, every checked out working tree will
@@ -48,14 +49,14 @@ gone through the git tutorial, and generally familiarized yourself with
 how to commit stuff etc in git) is to create a git'ified version of your
 CVS archive.
 
-Happily, that's very easy indeed. Git will do it for you, although git
+Happily, that's very easy indeed. git will do it for you, although git
 will need the help of a program called "cvsps":
 
 	http://www.cobite.com/cvsps/
 
 which is not actually related to git at all, but which makes CVS usage
 look almost sane (ie you almost certainly want to have it even if you
-decide to stay with CVS). However, git will want at _least_ version 2.1
+decide to stay with CVS). However, git will want 'at least' version 2.1
 of cvsps (available at the address above), and in fact will currently
 refuse to work with anything else.
 
@@ -63,7 +64,7 @@ Once you've gotten (and installed) cvsps, you may or may not want to get
 any more familiar with it, but make sure it is in your path. After that,
 the magic command line is
 
-	git cvsimport -v -d <cvsroot> <module> <destination>
+	git cvsimport -v -d <cvsroot> -C <destination> <module>
 
 which will do exactly what you'd think it does: it will create a git
 archive of the named CVS module. The new archive will be created in the
@@ -90,7 +91,7 @@ from CVS.
 You can merge those updates (or, in fact, a different CVS branch) into
 your main branch:
 
-	cg-merge <branch>
+	git resolve HEAD origin "merge with current CVS HEAD"
 
 The HEAD revision from CVS is named "origin", not "HEAD", because git
 already uses "HEAD". (If you don't like 'origin', use cvsimport's
@@ -101,10 +102,24 @@ Emulating CVS behaviour
 -----------------------
 
 
-FIXME! Talk about setting up several repositories, and pulling and
-pushing between them. Talk about merging, and branches. Some of this
-needs to be in the tutorial too.
+So, by now you are convinced you absolutely want to work with git, but
+at the same time you absolutely have to have a central repository.
+Step back and think again. Okay, you still need a single central
+repository? There are several ways to go about that:
 
+1. Designate a person responsible to pull all branches. Make the
+repository of this person public, and make every team member
+pull regularly from it.
+
+2. Set up a public repository with read/write access for every team
+member. Use "git pull/push" as you used "cvs update/commit".  Be
+sure that your repository is up to date before pushing, just
+like you used to do with "cvs commit"; your push will fail if
+what you are pushing is not up to date.
+
+3. Make the repository of every team member public. It is the
+responsibility of each single member to pull from every other
+team member.
 
 
 CVS annotate
@@ -120,7 +135,7 @@ technically possible, and there are at least two specialized scripts out
 there that can be used to get equivalent information (see the git
 mailing list archives for details). 
 
-Git has a couple of alternatives, though, that you may find sufficient
+git has a couple of alternatives, though, that you may find sufficient
 or even superior depending on your use.  One is called "git-whatchanged"
 (for obvious reasons) and the other one is called "pickaxe" ("a tool for
 the software archeologist"). 
@@ -157,7 +172,7 @@ modifications that are not related to the piece of code you are
 interested in.  You would see many log messages and patches that
 do not have anything to do with the piece of code you are
 interested in.  As an example, assuming that you have this piece
-code that you are interested in in the HEAD version:
+of code that you are interested in in the HEAD version:
 
 	if (frotz) {
 		nitfol();
@@ -170,9 +185,10 @@ you would use git-rev-list and git-diff-tree like this:
 		nitfol();
 	}'
 
-We have already talked about the "--stdin" form of git-diff-tree
+We have already talked about the "\--stdin" form of git-diff-tree
 command that reads the list of commits and compares each commit
-with its parents.  The git-whatchanged command internally runs
+with its parents (otherwise you should go back and read the tutorial).
+The git-whatchanged command internally runs
 the equivalent of the above command, and can be used like this:
 
 	$ git-whatchanged -p -S'if (frotz) {
@@ -193,7 +209,7 @@ show anything for commits that do not touch this "if" statement.
 Also, in the original context, the same statement might have
 appeared at first in a different file and later the file was
 renamed to "a-file.c".  CVS annotate would not help you to go
-back across such a rename, but GIT would still help you in such
+back across such a rename, but git would still help you in such
 a situation.  For that, you can give the -C flag to
 git-diff-tree, like this:
 
@@ -207,16 +223,16 @@ in the current HEAD commit, even if the file was originally
 called "o-file.c" and then renamed in an earlier commit, or if
 the file was created by copying an existing "o-file.c" in an
 earlier commit, you will not lose track.  If the "if" statement
-did not change across such rename or copy, then the commit that
+did not change across such a rename or copy, then the commit that
 does rename or copy would not show in the output, and if the
 "if" statement was modified while the file was still called
 "o-file.c", it would find the commit that changed the statement
 when it was in "o-file.c".
 
-[ BTW, the current versions of "git-diff-tree -C" is not eager
+NOTE: The current version of "git-diff-tree -C" is not eager
   enough to find copies, and it will miss the fact that a-file.c
   was created by copying o-file.c unless o-file.c was somehow
-  changed in the same commit.]
+  changed in the same commit.
 
 You can use the --pickaxe-all flag in addition to the -S flag.
 This causes the differences from all the files contained in
@@ -227,6 +243,6 @@ that contain this changed "if" statement:
 		nitfol();
 	}' --pickaxe-all
 
-[ Side note.  This option is called "--pickaxe-all" because -S
+NOTE: This option is called "--pickaxe-all" because -S
   option is internally called "pickaxe", a tool for software
-  archaeologists.]
+  archaeologists.

@@ -3,6 +3,18 @@
 
 const char *tag_type = "tag";
 
+struct object *deref_tag(struct object *o, const char *warn, int warnlen)
+{
+	while (o && o->type == tag_type)
+		o = parse_object(((struct tag *)o)->tagged->sha1);
+	if (!o && warn) {
+		if (!warnlen)
+			warnlen = strlen(warn);
+		error("missing object referenced by '%.*s'", warnlen, warn);
+	}
+	return o;
+}
+
 struct tag *lookup_tag(const unsigned char *sha1)
 {
         struct object *obj = lookup_object(sha1);
@@ -63,8 +75,11 @@ int parse_tag_buffer(struct tag *item, void *data, unsigned long size)
 	item->tag[taglen] = '\0';
 
 	item->tagged = lookup_object_type(object, type);
-	if (item->tagged)
-		add_ref(&item->object, item->tagged);
+	if (item->tagged && track_object_refs) {
+		struct object_refs *refs = alloc_object_refs(1);
+		refs->ref[0] = item->tagged;
+		set_object_refs(&item->object, refs);
+	}
 
 	return 0;
 }

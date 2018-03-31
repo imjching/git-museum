@@ -6,6 +6,7 @@
 #include "cache.h"
 
 struct cache_entry **active_cache = NULL;
+static time_t index_file_timestamp;
 unsigned int active_nr = 0, active_alloc = 0, active_cache_changed = 0;
 
 /*
@@ -28,15 +29,76 @@ void fill_stat_cache_info(struct cache_entry *ce, struct stat *st)
 	ce->ce_size = htonl(st->st_size);
 }
 
-int ce_match_stat(struct cache_entry *ce, struct stat *st)
+static int ce_compare_data(struct cache_entry *ce, struct stat *st)
+{
+	int match = -1;
+	int fd = open(ce->name, O_RDONLY);
+
+	if (fd >= 0) {
+		unsigned char sha1[20];
+		if (!index_fd(sha1, fd, st, 0, NULL))
+			match = memcmp(sha1, ce->sha1, 20);
+		close(fd);
+	}
+	return match;
+}
+
+static int ce_compare_link(struct cache_entry *ce, unsigned long expected_size)
+{
+	int match = -1;
+	char *target;
+	void *buffer;
+	unsigned long size;
+	char type[10];
+	int len;
+
+	target = xmalloc(expected_size);
+	len = readlink(ce->name, target, expected_size);
+	if (len != expected_size) {
+		free(target);
+		return -1;
+	}
+	buffer = read_sha1_file(ce->sha1, type, &size);
+	if (!buffer) {
+		free(target);
+		return -1;
+	}
+	if (size == expected_size)
+		match = memcmp(buffer, target, size);
+	free(buffer);
+	free(target);
+	return match;
+}
+
+static int ce_modified_check_fs(struct cache_entry *ce, struct stat *st)
+{
+	switch (st->st_mode & S_IFMT) {
+	case S_IFREG:
+		if (ce_compare_data(ce, st))
+			return DATA_CHANGED;
+		break;
+	case S_IFLNK:
+		if (ce_compare_link(ce, st->st_size))
+			return DATA_CHANGED;
+		break;
+	default:
+		return TYPE_CHANGED;
+	}
+	return 0;
+}
+
+static int ce_match_stat_basic(struct cache_entry *ce, struct stat *st)
 {
 	unsigned int changed = 0;
 
 	switch (ntohl(ce->ce_mode) & S_IFMT) {
 	case S_IFREG:
 		changed |= !S_ISREG(st->st_mode) ? TYPE_CHANGED : 0;
-		/* We consider only the owner x bit to be relevant for "mode changes" */
-		if (0100 & (ntohl(ce->ce_mode) ^ st->st_mode))
+		/* We consider only the owner x bit to be relevant for
+		 * "mode changes"
+		 */
+		if (trust_executable_bit &&
+		    (0100 & (ntohl(ce->ce_mode) ^ st->st_mode)))
 			changed |= MODE_CHANGED;
 		break;
 	case S_IFLNK:
@@ -80,7 +142,62 @@ int ce_match_stat(struct cache_entry *ce, struct stat *st)
 
 	if (ce->ce_size != htonl(st->st_size))
 		changed |= DATA_CHANGED;
+
 	return changed;
+}
+
+int ce_match_stat(struct cache_entry *ce, struct stat *st)
+{
+	unsigned int changed = ce_match_stat_basic(ce, st);
+
+	/*
+	 * Within 1 second of this sequence:
+	 * 	echo xyzzy >file && git-update-index --add file
+	 * running this command:
+	 * 	echo frotz >file
+	 * would give a falsely clean cache entry.  The mtime and
+	 * length match the cache, and other stat fields do not change.
+	 *
+	 * We could detect this at update-index time (the cache entry
+	 * being registered/updated records the same time as "now")
+	 * and delay the return from git-update-index, but that would
+	 * effectively mean we can make at most one commit per second,
+	 * which is not acceptable.  Instead, we check cache entries
+	 * whose mtime are the same as the index file timestamp more
+	 * careful than others.
+	 */
+	if (!changed &&
+	    index_file_timestamp &&
+	    index_file_timestamp <= ntohl(ce->ce_mtime.sec))
+		changed |= ce_modified_check_fs(ce, st);
+
+	return changed;
+}
+
+int ce_modified(struct cache_entry *ce, struct stat *st)
+{
+	int changed, changed_fs;
+	changed = ce_match_stat(ce, st);
+	if (!changed)
+		return 0;
+	/*
+	 * If the mode or type has changed, there's no point in trying
+	 * to refresh the entry - it's not going to match
+	 */
+	if (changed & (MODE_CHANGED | TYPE_CHANGED))
+		return changed;
+
+	/* Immediately after read-tree or update-index --cacheinfo,
+	 * the length field is zero.  For other cases the ce_size
+	 * should match the SHA1 recorded in the index entry.
+	 */
+	if ((changed & DATA_CHANGED) && ce->ce_size != htonl(0))
+		return changed;
+
+	changed_fs = ce_modified_check_fs(ce, st);
+	if (changed_fs)
+		return changed | changed_fs;
+	return 0;
 }
 
 int base_name_compare(const char *name1, int len1, int mode1,
@@ -155,7 +272,7 @@ int remove_cache_entry_at(int pos)
 	return 1;
 }
 
-int remove_file_from_cache(char *path)
+int remove_file_from_cache(const char *path)
 {
 	int pos = cache_name_pos(path, strlen(path));
 	if (pos < 0)
@@ -169,6 +286,32 @@ int ce_same_name(struct cache_entry *a, struct cache_entry *b)
 {
 	int len = ce_namelen(a);
 	return ce_namelen(b) == len && !memcmp(a->name, b->name, len);
+}
+
+int ce_path_match(const struct cache_entry *ce, const char **pathspec)
+{
+	const char *match, *name;
+	int len;
+
+	if (!pathspec)
+		return 1;
+
+	len = ce_namelen(ce);
+	name = ce->name;
+	while ((match = *pathspec++) != NULL) {
+		int matchlen = strlen(match);
+		if (matchlen > len)
+			continue;
+		if (memcmp(name, match, matchlen))
+			continue;
+		if (matchlen && name[matchlen-1] == '/')
+			return 1;
+		if (name[matchlen] == '/' || !name[matchlen])
+			return 1;
+		if (!matchlen)
+			return 1;
+	}
+	return 0;
 }
 
 /*
@@ -289,7 +432,7 @@ int add_cache_entry(struct cache_entry *ce, int option)
 	int skip_df_check = option & ADD_CACHE_SKIP_DFCHECK;
 	pos = cache_name_pos(ce->name, ntohs(ce->ce_flags));
 
-	/* existing match? Just replace it */
+	/* existing match? Just replace it. */
 	if (pos >= 0) {
 		active_cache_changed = 1;
 		active_cache[pos] = ce;
@@ -312,7 +455,8 @@ int add_cache_entry(struct cache_entry *ce, int option)
 	if (!ok_to_add)
 		return -1;
 
-	if (!skip_df_check && check_file_directory_conflict(ce, pos, ok_to_replace)) {
+	if (!skip_df_check &&
+	    check_file_directory_conflict(ce, pos, ok_to_replace)) {
 		if (!ok_to_replace)
 			return -1;
 		pos = cache_name_pos(ce->name, ntohs(ce->ce_flags));
@@ -361,14 +505,19 @@ int read_cache(void)
 
 	errno = EBUSY;
 	if (active_cache)
-		return error("more than one cachefile");
+		return active_nr;
+
 	errno = ENOENT;
+	index_file_timestamp = 0;
 	fd = open(get_index_file(), O_RDONLY);
-	if (fd < 0)
-		return (errno == ENOENT) ? 0 : error("open failed");
+	if (fd < 0) {
+		if (errno == ENOENT)
+			return 0;
+		die("index file open failed (%s)", strerror(errno));
+	}
 
 	size = 0; // avoid gcc warning
-	map = (void *)-1;
+	map = MAP_FAILED;
 	if (!fstat(fd, &st)) {
 		size = st.st_size;
 		errno = EINVAL;
@@ -376,8 +525,8 @@ int read_cache(void)
 			map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 	}
 	close(fd);
-	if (-1 == (int)(long)map)
-		return error("mmap failed");
+	if (map == MAP_FAILED)
+		die("index file mmap failed (%s)", strerror(errno));
 
 	hdr = map;
 	if (verify_hdr(hdr, size) < 0)
@@ -393,12 +542,13 @@ int read_cache(void)
 		offset = offset + ce_size(ce);
 		active_cache[i] = ce;
 	}
+	index_file_timestamp = st.st_mtime;
 	return active_nr;
 
 unmap:
 	munmap(map, size);
 	errno = EINVAL;
-	return error("verify header failed");
+	die("index file corrupt");
 }
 
 #define WRITE_BUFFER_SIZE 8192
@@ -436,12 +586,63 @@ static int ce_flush(SHA_CTX *context, int fd)
 		SHA1_Update(context, write_buffer, left);
 	}
 
+	/* Flush first if not enough space for SHA1 signature */
+	if (left + 20 > WRITE_BUFFER_SIZE) {
+		if (write(fd, write_buffer, left) != left)
+			return -1;
+		left = 0;
+	}
+
 	/* Append the SHA1 signature at the end */
 	SHA1_Final(write_buffer + left, context);
 	left += 20;
 	if (write(fd, write_buffer, left) != left)
 		return -1;
 	return 0;
+}
+
+static void ce_smudge_racily_clean_entry(struct cache_entry *ce)
+{
+	/*
+	 * The only thing we care about in this function is to smudge the
+	 * falsely clean entry due to touch-update-touch race, so we leave
+	 * everything else as they are.  We are called for entries whose
+	 * ce_mtime match the index file mtime.
+	 */
+	struct stat st;
+
+	if (lstat(ce->name, &st) < 0)
+		return;
+	if (ce_match_stat_basic(ce, &st))
+		return;
+	if (ce_modified_check_fs(ce, &st)) {
+		/* This is "racily clean"; smudge it.  Note that this
+		 * is a tricky code.  At first glance, it may appear
+		 * that it can break with this sequence:
+		 *
+		 * $ echo xyzzy >frotz
+		 * $ git-update-index --add frotz
+		 * $ : >frotz
+		 * $ sleep 3
+		 * $ echo filfre >nitfol
+		 * $ git-update-index --add nitfol
+		 *
+		 * but it does not.  Whe the second update-index runs,
+		 * it notices that the entry "frotz" has the same timestamp
+		 * as index, and if we were to smudge it by resetting its
+		 * size to zero here, then the object name recorded
+		 * in index is the 6-byte file but the cached stat information
+		 * becomes zero --- which would then match what we would
+		 * obtain from the filesystem next time we stat("frotz"). 
+		 *
+		 * However, the second update-index, before calling
+		 * this function, notices that the cached size is 6
+		 * bytes and what is on the filesystem is an empty
+		 * file, and never calls us, so the cached size information
+		 * for "frotz" stays 6 which does not match the filesystem.
+		 */
+		ce->ce_size = htonl(0);
+	}
 }
 
 int write_cache(int newfd, struct cache_entry **cache, int entries)
@@ -466,6 +667,9 @@ int write_cache(int newfd, struct cache_entry **cache, int entries)
 		struct cache_entry *ce = cache[i];
 		if (!ce->ce_mode)
 			continue;
+		if (index_file_timestamp &&
+		    index_file_timestamp <= ntohl(ce->ce_mtime.sec))
+			ce_smudge_racily_clean_entry(ce);
 		if (ce_write(&c, newfd, ce, ce_size(ce)) < 0)
 			return -1;
 	}

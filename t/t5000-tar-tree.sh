@@ -25,6 +25,7 @@ commit id embedding:
 '
 
 . ./test-lib.sh
+TAR=${TAR:-tar}
 
 test_expect_success \
     'populate workdir' \
@@ -37,12 +38,12 @@ test_expect_success \
 
 test_expect_success \
     'add files to repository' \
-    'find a -type f | xargs git-update-cache --add &&
-     find a -type l | xargs git-update-cache --add &&
+    'find a -type f | xargs git-update-index --add &&
+     find a -type l | xargs git-update-index --add &&
      treeid=`git-write-tree` &&
      echo $treeid >treeid &&
-     TZ= GIT_COMMITTER_DATE="2005-05-27 22:00:00" \
-     git-commit-tree $treeid </dev/null >.git/HEAD'
+     git-update-ref HEAD $(TZ=GMT GIT_COMMITTER_DATE="2005-05-27 22:00:00" \
+     git-commit-tree $treeid </dev/null)'
 
 test_expect_success \
     'git-tar-tree' \
@@ -50,7 +51,7 @@ test_expect_success \
 
 test_expect_success \
     'validate file modification time' \
-    'TZ= tar tvf b.tar a/a |
+    'TZ=GMT $TAR tvf b.tar a/a |
      awk \{print\ \$4,\ \(length\(\$5\)\<7\)\ ?\ \$5\":00\"\ :\ \$5\} \
      >b.mtime &&
      echo "2005-05-27 22:00:00" >expected.mtime &&
@@ -59,11 +60,11 @@ test_expect_success \
 test_expect_success \
     'git-get-tar-commit-id' \
     'git-get-tar-commit-id <b.tar >b.commitid &&
-     diff .git/HEAD b.commitid'
+     diff .git/$(git-symbolic-ref HEAD) b.commitid'
 
 test_expect_success \
     'extract tar archive' \
-    '(cd b && tar xf -) <b.tar'
+    '(cd b && $TAR xf -) <b.tar'
 
 test_expect_success \
     'validate filenames' \
@@ -80,7 +81,7 @@ test_expect_success \
 
 test_expect_success \
     'extract tar archive with prefix' \
-    '(cd c && tar xf -) <c.tar'
+    '(cd c && $TAR xf -) <c.tar'
 
 test_expect_success \
     'validate filenames with prefix' \

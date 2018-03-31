@@ -7,16 +7,6 @@ test_description='Tests git-rev-list --bisect functionality'
 . ./test-lib.sh
 . ../t6000lib.sh # t6xxx specific functions
 
-bc_expr()
-{
-bc <<EOF
-scale=1
-define abs(x) { if (x>=0) { return x; } else { return -x; } }
-define floor(x) { save=scale; scale=0; result=x/1; scale=save; return result; }
-$*
-EOF
-}
-
 # usage: test_bisection max-diff bisect-option head ^prune...
 #
 # e.g. test_bisection 1 --bisect l1 ^l0
@@ -31,12 +21,23 @@ test_bisection_diff()
         _head=$1
 	shift 1
 	_bisection_size=$(git-rev-list $_bisection "$@" | wc -l)
-	[ -n "$_list_size" -a -n "$_bisection_size" ] || error "test_bisection_diff failed"
-	test_expect_success "bisection diff $_bisect_option $_head $* <= $_max_diff" "[ $(bc_expr "floor(abs($_list_size/2)-$_bisection_size)") -le $_max_diff ]"
+	[ -n "$_list_size" -a -n "$_bisection_size" ] ||
+	error "test_bisection_diff failed"
+
+	# Test if bisection size is close to half of list size within
+	# tolerance.
+	# 
+	_bisect_err=`expr $_list_size - $_bisection_size \* 2`
+	test "$_bisect_err" -lt 0 && _bisect_err=`expr 0 - $_bisect_err`
+	_bisect_err=`expr $_bisect_err / 2` ; # floor
+
+	test_expect_success \
+	"bisection diff $_bisect_option $_head $* <= $_max_diff" \
+	'test $_bisect_err -le $_max_diff'
 }
 
 date >path0
-git-update-cache --add path0
+git-update-index --add path0
 save_tag tree git-write-tree
 on_committer_date "1971-08-16 00:00:00" hide_error save_tag root unique_commit root tree
 on_committer_date "1971-08-16 00:00:01" save_tag l0 unique_commit l0 tree -p root
@@ -57,7 +58,7 @@ on_committer_date "1971-08-16 00:00:15" save_tag a4 unique_commit a4 tree -p a3 
 on_committer_date "1971-08-16 00:00:16" save_tag l3 unique_commit l3 tree -p a4
 on_committer_date "1971-08-16 00:00:17" save_tag l4 unique_commit l4 tree -p l3
 on_committer_date "1971-08-16 00:00:18" save_tag l5 unique_commit l5 tree -p l4
-tag l5 > .git/HEAD
+git-update-ref HEAD $(tag l5)
 
 
 #     E

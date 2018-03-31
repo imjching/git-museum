@@ -1,5 +1,7 @@
 #include "tree.h"
 #include "blob.h"
+#include "commit.h"
+#include "tag.h"
 #include "cache.h"
 #include <stdlib.h>
 
@@ -7,9 +9,16 @@ const char *tree_type = "tree";
 
 static int read_one_entry(unsigned char *sha1, const char *base, int baselen, const char *pathname, unsigned mode, int stage)
 {
-	int len = strlen(pathname);
-	unsigned int size = cache_entry_size(baselen + len);
-	struct cache_entry *ce = xmalloc(size);
+	int len;
+	unsigned int size;
+	struct cache_entry *ce;
+
+	if (S_ISDIR(mode))
+		return READ_TREE_RECURSIVE;
+
+	len = strlen(pathname);
+	size = cache_entry_size(baselen + len);
+	ce = xmalloc(size);
 
 	memset(ce, 0, size);
 
@@ -21,8 +30,54 @@ static int read_one_entry(unsigned char *sha1, const char *base, int baselen, co
 	return add_cache_entry(ce, ADD_CACHE_OK_TO_ADD|ADD_CACHE_SKIP_DFCHECK);
 }
 
-static int read_tree_recursive(void *buffer, unsigned long size,
-			       const char *base, int baselen, int stage)
+static int match_tree_entry(const char *base, int baselen, const char *path, unsigned int mode, const char **paths)
+{
+	const char *match;
+	int pathlen;
+
+	if (!paths)
+		return 1;
+	pathlen = strlen(path);
+	while ((match = *paths++) != NULL) {
+		int matchlen = strlen(match);
+
+		if (baselen >= matchlen) {
+			/* If it doesn't match, move along... */
+			if (strncmp(base, match, matchlen))
+				continue;
+			/* The base is a subdirectory of a path which was specified. */
+			return 1;
+		}
+
+		/* Does the base match? */
+		if (strncmp(base, match, baselen))
+			continue;
+
+		match += baselen;
+		matchlen -= baselen;
+
+		if (pathlen > matchlen)
+			continue;
+
+		if (matchlen > pathlen) {
+			if (match[pathlen] != '/')
+				continue;
+			if (!S_ISDIR(mode))
+				continue;
+		}
+
+		if (strncmp(path, match, pathlen))
+			continue;
+
+		return 1;
+	}
+	return 0;
+}
+
+int read_tree_recursive(void *buffer, unsigned long size,
+			const char *base, int baselen,
+			int stage, const char **match,
+			read_tree_fn_t fn)
 {
 	while (size) {
 		int len = strlen(buffer)+1;
@@ -36,6 +91,17 @@ static int read_tree_recursive(void *buffer, unsigned long size,
 		buffer = sha1 + 20;
 		size -= len + 20;
 
+		if (!match_tree_entry(base, baselen, path, mode, match))
+			continue;
+
+		switch (fn(sha1, base, baselen, path, mode, stage)) {
+		case 0:
+			continue;
+		case READ_TREE_RECURSIVE:
+			break;;
+		default:
+			return -1;
+		}
 		if (S_ISDIR(mode)) {
 			int retval;
 			int pathlen = strlen(path);
@@ -55,22 +121,21 @@ static int read_tree_recursive(void *buffer, unsigned long size,
 			newbase[baselen + pathlen] = '/';
 			retval = read_tree_recursive(eltbuf, eltsize,
 						     newbase,
-						     baselen + pathlen + 1, stage);
+						     baselen + pathlen + 1,
+						     stage, match, fn);
 			free(eltbuf);
 			free(newbase);
 			if (retval)
 				return -1;
 			continue;
 		}
-		if (read_one_entry(sha1, base, baselen, path, mode, stage) < 0)
-			return -1;
 	}
 	return 0;
 }
 
-int read_tree(void *buffer, unsigned long size, int stage)
+int read_tree(void *buffer, unsigned long size, int stage, const char **match)
 {
-	return read_tree_recursive(buffer, size, "", 0, stage);
+	return read_tree_recursive(buffer, size, "", 0, stage, match, read_one_entry);
 }
 
 struct tree *lookup_tree(const unsigned char *sha1)
@@ -97,6 +162,7 @@ int parse_tree_buffer(struct tree *item, void *buffer, unsigned long size)
 {
 	void *bufptr = buffer;
 	struct tree_entry_list **list_p;
+	int n_refs = 0;
 
 	if (item->object.parsed)
 		return 0;
@@ -118,6 +184,7 @@ int parse_tree_buffer(struct tree *item, void *buffer, unsigned long size)
 		entry->directory = S_ISDIR(mode) != 0;
 		entry->executable = (mode & S_IXUSR) != 0;
 		entry->symlink = S_ISLNK(mode) != 0;
+		entry->zeropad = *(char *)bufptr == '0';
 		entry->mode = mode;
 		entry->next = NULL;
 
@@ -132,11 +199,20 @@ int parse_tree_buffer(struct tree *item, void *buffer, unsigned long size)
 			obj = &entry->item.blob->object;
 		}
 		if (obj)
-			add_ref(&item->object, obj);
-		entry->parent = NULL; /* needs to be filled by the user */
+			n_refs++;
 		*list_p = entry;
 		list_p = &entry->next;
 	}
+
+	if (track_object_refs) {
+		struct tree_entry_list *entry;
+		unsigned i = 0;
+		struct object_refs *refs = alloc_object_refs(n_refs);
+		for (entry = item->entries; entry; entry = entry->next)
+			refs->ref[i++] = entry->item.any;
+		set_object_refs(&item->object, refs);
+	}
+
 	return 0;
 }
 
@@ -161,4 +237,23 @@ int parse_tree(struct tree *item)
 	ret = parse_tree_buffer(item, buffer, size);
 	free(buffer);
 	return ret;
+}
+
+struct tree *parse_tree_indirect(const unsigned char *sha1)
+{
+	struct object *obj = parse_object(sha1);
+	do {
+		if (!obj)
+			return NULL;
+		if (obj->type == tree_type)
+			return (struct tree *) obj;
+		else if (obj->type == commit_type)
+			obj = &(((struct commit *) obj)->tree->object);
+		else if (obj->type == tag_type)
+			obj = ((struct tag *) obj)->tagged;
+		else
+			return NULL;
+		if (!obj->parsed)
+			parse_object(obj->sha1);
+	} while (1);
 }

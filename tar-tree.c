@@ -17,7 +17,7 @@
 #define EXT_HEADER_PATH		1
 #define EXT_HEADER_LINKPATH	2
 
-static const char *tar_tree_usage = "git-tar-tree <key> [basedir]";
+static const char tar_tree_usage[] = "git-tar-tree <key> [basedir]";
 
 static char block[BLOCKSIZE];
 static unsigned long offset;
@@ -34,10 +34,8 @@ struct path_prefix {
 static void reliable_write(void *buf, unsigned long size)
 {
 	while (size > 0) {
-		long ret = write(1, buf, size);
+		long ret = xwrite(1, buf, size);
 		if (ret < 0) {
-			if (errno == EAGAIN)
-				continue;
 			if (errno == EPIPE)
 				exit(0);
 			die("git-tar-tree: %s", strerror(errno));
@@ -325,8 +323,8 @@ static void write_header(const unsigned char *sha1, char typeflag, const char *b
 	memcpy(&header[257], "ustar", 6);
 	memcpy(&header[263], "00", 2);
 
-	printf(&header[329], "%07o", 0);	/* devmajor */
-	printf(&header[337], "%07o", 0);	/* devminor */
+	sprintf(&header[329], "%07o", 0);	/* devmajor */
+	sprintf(&header[337], "%07o", 0);	/* devminor */
 
 	memset(&header[148], ' ', 8);
 	for (i = 0; i < RECORDSIZE; i++)
@@ -353,6 +351,8 @@ static void traverse_tree(void *buffer, unsigned long size,
 
 		if (size < namelen + 20 || sscanf(buffer, "%o", &mode) != 1)
 			die("corrupt 'tree' file");
+		if (S_ISDIR(mode) || S_ISREG(mode))
+			mode |= (mode & 0100) ? 0777 : 0666;
 		buffer = sha1 + 20;
 		size -= namelen + 20;
 
@@ -404,6 +404,8 @@ int main(int argc, char **argv)
 	unsigned char commit_sha1[20];
 	void *buffer;
 	unsigned long size;
+
+	setup_git_directory();
 
 	switch (argc) {
 	case 3:

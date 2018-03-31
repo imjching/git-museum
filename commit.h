@@ -17,10 +17,13 @@ struct commit {
 	char *buffer;
 };
 
+extern int save_commit_buffer;
 extern const char *commit_type;
 
 struct commit *lookup_commit(const unsigned char *sha1);
 struct commit *lookup_commit_reference(const unsigned char *sha1);
+struct commit *lookup_commit_reference_gently(const unsigned char *sha1,
+					      int quiet);
 
 int parse_commit_buffer(struct commit *item, void *buffer, unsigned long size);
 
@@ -40,6 +43,8 @@ enum cmit_fmt {
 	CMIT_FMT_DEFAULT = CMIT_FMT_MEDIUM,
 	CMIT_FMT_SHORT,
 	CMIT_FMT_FULL,
+	CMIT_FMT_FULLER,
+	CMIT_FMT_ONELINE,
 };
 
 extern enum cmit_fmt get_commit_format(const char *arg);

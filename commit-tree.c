@@ -5,10 +5,6 @@
  */
 #include "cache.h"
 
-#include <pwd.h>
-#include <time.h>
-#include <ctype.h>
-
 #define BLOCKING (1ul << 14)
 
 /*
@@ -45,39 +41,6 @@ static void add_buffer(char **bufp, unsigned int *sizep, const char *fmt, ...)
 	memcpy(buf + size, one_line, len);
 }
 
-static void remove_special(char *p)
-{
-	char c;
-	char *dst = p, *src = p;
-
-	for (;;) {
-		c = *src;
-		src++;
-		switch(c) {
-		case '\n': case '<': case '>':
-			continue;
-		}
-		*dst++ = c;
-		if (!c)
-			break;
-	}
-
-	/*
-	 * Go back, and remove crud from the end: some people
-	 * have commas etc in their gecos field
-	 */
-	dst--;
-	while (--dst >= p) {
-		unsigned char c = *dst;
-		switch (c) {
-		case ',': case ';': case '.':
-			*dst = 0;
-			continue;
-		}
-		break;
-	}
-}
-
 static void check_valid(unsigned char *sha1, const char *expect)
 {
 	void *buf;
@@ -97,7 +60,7 @@ static void check_valid(unsigned char *sha1, const char *expect)
 #define MAXPARENT (16)
 static unsigned char parent_sha1[MAXPARENT][20];
 
-static char *commit_tree_usage = "git-commit-tree <sha1> [-p <sha1>]* < changelog";
+static const char commit_tree_usage[] = "git-commit-tree <sha1> [-p <sha1>]* < changelog";
 
 static int new_parent(int idx)
 {
@@ -114,21 +77,21 @@ static int new_parent(int idx)
 
 int main(int argc, char **argv)
 {
-	int i, len;
+	int i;
 	int parents = 0;
 	unsigned char tree_sha1[20];
 	unsigned char commit_sha1[20];
-	char *gecos, *realgecos, *commitgecos;
-	char *email, *commitemail, realemail[1000];
-	char date[50], realdate[50];
-	char *audate, *cmdate;
 	char comment[1000];
-	struct passwd *pw;
 	char *buffer;
 	unsigned int size;
 
+	setup_ident();
+	git_config(git_default_config);
+
 	if (argc < 2 || get_sha1_hex(argv[1], tree_sha1) < 0)
 		usage(commit_tree_usage);
+
+	setup_git_directory();
 
 	check_valid(tree_sha1, "tree");
 	for (i = 2; i < argc; i += 2) {
@@ -142,35 +105,6 @@ int main(int argc, char **argv)
 	}
 	if (!parents)
 		fprintf(stderr, "Committing initial tree %s\n", argv[1]);
-	pw = getpwuid(getuid());
-	if (!pw)
-		die("You don't exist. Go away!");
-	realgecos = pw->pw_gecos;
-	len = strlen(pw->pw_name);
-	memcpy(realemail, pw->pw_name, len);
-	realemail[len] = '@';
-	gethostname(realemail+len+1, sizeof(realemail)-len-1);
-	if (!strchr(realemail+len+1, '.')) {
-		strcat(realemail, ".");
-		getdomainname(realemail+strlen(realemail), sizeof(realemail)-strlen(realemail)-1);
-	}
-
-	datestamp(realdate, sizeof(realdate));
-	strcpy(date, realdate);
-
-	commitgecos = gitenv("GIT_COMMITTER_NAME") ? : realgecos;
-	commitemail = gitenv("GIT_COMMITTER_EMAIL") ? : realemail;
-	gecos = gitenv("GIT_AUTHOR_NAME") ? : realgecos;
-	email = gitenv("GIT_AUTHOR_EMAIL") ? : realemail;
-	audate = gitenv("GIT_AUTHOR_DATE");
-	if (audate)
-		parse_date(audate, date, sizeof(date));
-	cmdate = gitenv("GIT_COMMITTER_DATE");
-	if (cmdate)
-		parse_date(cmdate, realdate, sizeof(realdate));
-
-	remove_special(gecos); remove_special(realgecos); remove_special(commitgecos);
-	remove_special(email); remove_special(realemail); remove_special(commitemail);
 
 	init_buffer(&buffer, &size);
 	add_buffer(&buffer, &size, "tree %s\n", sha1_to_hex(tree_sha1));
@@ -184,8 +118,8 @@ int main(int argc, char **argv)
 		add_buffer(&buffer, &size, "parent %s\n", sha1_to_hex(parent_sha1[i]));
 
 	/* Person/date information */
-	add_buffer(&buffer, &size, "author %s <%s> %s\n", gecos, email, date);
-	add_buffer(&buffer, &size, "committer %s <%s> %s\n\n", commitgecos, commitemail, realdate);
+	add_buffer(&buffer, &size, "author %s\n", git_author_info());
+	add_buffer(&buffer, &size, "committer %s\n\n", git_committer_info());
 
 	/* And add the comment */
 	while (fgets(comment, sizeof(comment), stdin) != NULL)

@@ -8,6 +8,13 @@ test_description='Tests git-rev-list --merge-order functionality'
 . ./test-lib.sh
 . ../t6000lib.sh # t6xxx specific functions
 
+if git-rev-list --merge-order 2>&1 | grep 'OpenSSL not linked' >/dev/null
+then
+    test_expect_success 'skipping merge-order test' :
+    test_done
+    exit
+fi    
+
 # test-case specific test function
 check_adjacency()
 {
@@ -38,7 +45,7 @@ grep_stderr()
 }
 
 date >path0
-git-update-cache --add path0
+git-update-index --add path0
 save_tag tree git-write-tree
 on_committer_date "1971-08-16 00:00:00" hide_error save_tag root unique_commit root tree
 on_committer_date "1971-08-16 00:00:01" save_tag l0 unique_commit l0 tree -p root
@@ -101,7 +108,7 @@ save_tag h2 unique_commit g4 tree -p g2
 save_tag g3 unique_commit g5 tree -p g2
 save_tag g4 unique_commit g6 tree -p g3 -p h2
 
-tag l5 > .git/HEAD
+git-update-ref HEAD $(tag l5)
 
 test_expect_success 'rev-list has correct number of entries' 'git-rev-list HEAD | wc -l | tr -s " "' <<EOF
 19

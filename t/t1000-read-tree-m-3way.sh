@@ -150,7 +150,7 @@ test_expect_success \
     "rm -fr [NDMALTS][NDMALTSF] Z &&
      rm .git/index &&
      git-read-tree $tree_A &&
-     git-checkout-cache -f -u -a &&
+     git-checkout-index -f -u -a &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -158,49 +158,33 @@ test_expect_success \
 
 We have so far tested only empty index and clean-and-matching-A index
 case which are trivial.  Make sure index requirements are also
-checked.  The table also lists alternative semantics which is not
-currently implemented.
+checked.
 
-"git-diff-tree -m O A B"
+"git-read-tree -m O A B"
 
      O       A       B         result      index requirements
 -------------------------------------------------------------------
   1  missing missing missing   -           must not exist.
  ------------------------------------------------------------------
-  2  missing missing exists    no merge    must not exist.
-                               ------------------------------------
-    (ALT)                      take B*     must match B, if exists.
+  2  missing missing exists    take B*     must match B, if exists.
  ------------------------------------------------------------------
-  3  missing exists  missing   no merge    must match A and be
-                                           up-to-date, if exists.
-                               ------------------------------------
-    (ALT)                      take A*     must match A, if exists.
+  3  missing exists  missing   take A*     must match A, if exists.
  ------------------------------------------------------------------
   4  missing exists  A!=B      no merge    must match A and be
                                            up-to-date, if exists.
  ------------------------------------------------------------------
-  5  missing exists  A==B      no merge    must match A and be
-                                           up-to-date, if exists.
-                               ------------------------------------
-    (ALT)                      take A      must match A, if exists.
+  5  missing exists  A==B      take A      must match A, if exists.
  ------------------------------------------------------------------
-  6  exists  missing missing   no merge    must not exist.
-                               ------------------------------------
-    (ALT)                      remove      must not exist.
+  6  exists  missing missing   remove      must not exist.
  ------------------------------------------------------------------
   7  exists  missing O!=B      no merge    must not exist.
  ------------------------------------------------------------------
-  8  exists  missing O==B      no merge    must not exist.
-                               ------------------------------------
-    (ALT)                      remove      must not exist.
+  8  exists  missing O==B      remove      must not exist.
  ------------------------------------------------------------------
   9  exists  O!=A    missing   no merge    must match A and be
                                            up-to-date, if exists.
  ------------------------------------------------------------------
- 10  exists  O==A    missing   no merge    must match A and be
-                                           up-to-date, if exists.
-                               ------------------------------------
-    (ALT)                      remove      ditto
+ 10  exists  O==A    missing   remove      ditto
  ------------------------------------------------------------------
  11  exists  O!=A    O!=B      no merge    must match A and be
                      A!=B                  up-to-date, if exists.
@@ -210,19 +194,19 @@ currently implemented.
  ------------------------------------------------------------------
  13  exists  O!=A    O==B      take A      must match A, if exists.
  ------------------------------------------------------------------
- 14  exists  O==A    O!=B      take B      must match A and be
-                                           be up-to-date, if exists.
-                               ------------------------------------
-    (ALT)                      take B      if exists, must either (1)
+ 14  exists  O==A    O!=B      take B      if exists, must either (1)
                                            match A and be up-to-date,
                                            or (2) match B.
  ------------------------------------------------------------------
  15  exists  O==A    O==B      take B      must match A if exists.
+ ------------------------------------------------------------------
+ 16  exists  O==A    O==B      barf        must match A if exists.
+     *multi* in one  in another
 -------------------------------------------------------------------
 
-Note: if we want to implement 2ALT and 3ALT we need to be careful.
-The tree A may contain DF (file) when tree B require DF to be a
-directory by having DF/DF (file).
+Note: we need to be careful in case 2 and 3.  The tree A may contain
+DF (file) when tree B require DF to be a directory by having DF/DF
+(file).
 
 END_OF_CASE_TABLE
 
@@ -230,21 +214,21 @@ test_expect_failure \
     '1 - must not have an entry not in A.' \
     "rm -f .git/index XX &&
      echo XX >XX &&
-     git-update-cache --add XX &&
+     git-update-index --add XX &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '2 - must match B in !O && !A && B case.' \
     "rm -f .git/index NA &&
      cp .orig-B/NA NA &&
-     git-update-cache --add NA &&
+     git-update-index --add NA &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '2 - matching B alone is OK in !O && !A && B case.' \
     "rm -f .git/index NA &&
      cp .orig-B/NA NA &&
-     git-update-cache --add NA &&
+     git-update-index --add NA &&
      echo extra >>NA &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -252,7 +236,7 @@ test_expect_success \
     '3 - must match A in !O && A && !B case.' \
     "rm -f .git/index AN &&
      cp .orig-A/AN AN &&
-     git-update-cache --add AN &&
+     git-update-index --add AN &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -260,7 +244,7 @@ test_expect_success \
     '3 - matching A alone is OK in !O && A && !B case.' \
     "rm -f .git/index AN &&
      cp .orig-A/AN AN &&
-     git-update-cache --add AN &&
+     git-update-index --add AN &&
      echo extra >>AN &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -269,14 +253,14 @@ test_expect_failure \
     "rm -f .git/index AN &&
      cp .orig-A/AN AN &&
      echo extra >>AN &&
-     git-update-cache --add AN &&
+     git-update-index --add AN &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '4 - must match and be up-to-date in !O && A && B && A!=B case.' \
     "rm -f .git/index AA &&
      cp .orig-A/AA AA &&
-     git-update-cache --add AA &&
+     git-update-index --add AA &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -284,7 +268,7 @@ test_expect_failure \
     '4 (fail) - must match and be up-to-date in !O && A && B && A!=B case.' \
     "rm -f .git/index AA &&
      cp .orig-A/AA AA &&
-     git-update-cache --add AA &&
+     git-update-index --add AA &&
      echo extra >>AA &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -293,14 +277,14 @@ test_expect_failure \
     "rm -f .git/index AA &&
      cp .orig-A/AA AA &&
      echo extra >>AA &&
-     git-update-cache --add AA &&
+     git-update-index --add AA &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '5 - must match in !O && A && B && A==B case.' \
     "rm -f .git/index LL &&
      cp .orig-A/LL LL &&
-     git-update-cache --add LL &&
+     git-update-index --add LL &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -308,7 +292,7 @@ test_expect_success \
     '5 - must match in !O && A && B && A==B case.' \
     "rm -f .git/index LL &&
      cp .orig-A/LL LL &&
-     git-update-cache --add LL &&
+     git-update-index --add LL &&
      echo extra >>LL &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
@@ -318,35 +302,35 @@ test_expect_failure \
     "rm -f .git/index LL &&
      cp .orig-A/LL LL &&
      echo extra >>LL &&
-     git-update-cache --add LL &&
+     git-update-index --add LL &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_failure \
     '6 - must not exist in O && !A && !B case' \
     "rm -f .git/index DD &&
      echo DD >DD
-     git-update-cache --add DD &&
+     git-update-index --add DD &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_failure \
     '7 - must not exist in O && !A && B && O!=B case' \
     "rm -f .git/index DM &&
      cp .orig-B/DM DM &&
-     git-update-cache --add DM &&
+     git-update-index --add DM &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_failure \
     '8 - must not exist in O && !A && B && O==B case' \
     "rm -f .git/index DN &&
      cp .orig-B/DN DN &&
-     git-update-cache --add DN &&
+     git-update-index --add DN &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '9 - must match and be up-to-date in O && A && !B && O!=A case' \
     "rm -f .git/index MD &&
      cp .orig-A/MD MD &&
-     git-update-cache --add MD &&
+     git-update-index --add MD &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -354,7 +338,7 @@ test_expect_failure \
     '9 (fail) - must match and be up-to-date in O && A && !B && O!=A case' \
     "rm -f .git/index MD &&
      cp .orig-A/MD MD &&
-     git-update-cache --add MD &&
+     git-update-index --add MD &&
      echo extra >>MD &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -363,14 +347,14 @@ test_expect_failure \
     "rm -f .git/index MD &&
      cp .orig-A/MD MD &&
      echo extra >>MD &&
-     git-update-cache --add MD &&
+     git-update-index --add MD &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '10 - must match and be up-to-date in O && A && !B && O==A case' \
     "rm -f .git/index ND &&
      cp .orig-A/ND ND &&
-     git-update-cache --add ND &&
+     git-update-index --add ND &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -378,7 +362,7 @@ test_expect_failure \
     '10 (fail) - must match and be up-to-date in O && A && !B && O==A case' \
     "rm -f .git/index ND &&
      cp .orig-A/ND ND &&
-     git-update-cache --add ND &&
+     git-update-index --add ND &&
      echo extra >>ND &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -387,14 +371,14 @@ test_expect_failure \
     "rm -f .git/index ND &&
      cp .orig-A/ND ND &&
      echo extra >>ND &&
-     git-update-cache --add ND &&
+     git-update-index --add ND &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '11 - must match and be up-to-date in O && A && B && O!=A && O!=B && A!=B case' \
     "rm -f .git/index MM &&
      cp .orig-A/MM MM &&
-     git-update-cache --add MM &&
+     git-update-index --add MM &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -402,7 +386,7 @@ test_expect_failure \
     '11 (fail) - must match and be up-to-date in O && A && B && O!=A && O!=B && A!=B case' \
     "rm -f .git/index MM &&
      cp .orig-A/MM MM &&
-     git-update-cache --add MM &&
+     git-update-index --add MM &&
      echo extra >>MM &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -411,14 +395,14 @@ test_expect_failure \
     "rm -f .git/index MM &&
      cp .orig-A/MM MM &&
      echo extra >>MM &&
-     git-update-cache --add MM &&
+     git-update-index --add MM &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '12 - must match A in O && A && B && O!=A && A==B case' \
     "rm -f .git/index SS &&
      cp .orig-A/SS SS &&
-     git-update-cache --add SS &&
+     git-update-index --add SS &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -426,7 +410,7 @@ test_expect_success \
     '12 - must match A in O && A && B && O!=A && A==B case' \
     "rm -f .git/index SS &&
      cp .orig-A/SS SS &&
-     git-update-cache --add SS &&
+     git-update-index --add SS &&
      echo extra >>SS &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
@@ -436,14 +420,14 @@ test_expect_failure \
     "rm -f .git/index SS &&
      cp .orig-A/SS SS &&
      echo extra >>SS &&
-     git-update-cache --add SS &&
+     git-update-index --add SS &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '13 - must match A in O && A && B && O!=A && O==B case' \
     "rm -f .git/index MN &&
      cp .orig-A/MN MN &&
-     git-update-cache --add MN &&
+     git-update-index --add MN &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -451,7 +435,7 @@ test_expect_success \
     '13 - must match A in O && A && B && O!=A && O==B case' \
     "rm -f .git/index MN &&
      cp .orig-A/MN MN &&
-     git-update-cache --add MN &&
+     git-update-index --add MN &&
      echo extra >>MN &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
@@ -460,7 +444,7 @@ test_expect_success \
     '14 - must match and be up-to-date in O && A && B && O==A && O!=B case' \
     "rm -f .git/index NM &&
      cp .orig-A/NM NM &&
-     git-update-cache --add NM &&
+     git-update-index --add NM &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -468,7 +452,7 @@ test_expect_success \
     '14 - may match B in O && A && B && O==A && O!=B case' \
     "rm -f .git/index NM &&
      cp .orig-B/NM NM &&
-     git-update-cache --add NM &&
+     git-update-index --add NM &&
      echo extra >>NM &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
@@ -477,7 +461,7 @@ test_expect_failure \
     '14 (fail) - must match and be up-to-date in O && A && B && O==A && O!=B case' \
     "rm -f .git/index NM &&
      cp .orig-A/NM NM &&
-     git-update-cache --add NM &&
+     git-update-index --add NM &&
      echo extra >>NM &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
@@ -486,14 +470,14 @@ test_expect_failure \
     "rm -f .git/index NM &&
      cp .orig-A/NM NM &&
      echo extra >>NM &&
-     git-update-cache --add NM &&
+     git-update-index --add NM &&
      git-read-tree -m $tree_O $tree_A $tree_B"
 
 test_expect_success \
     '15 - must match A in O && A && B && O==A && O==B case' \
     "rm -f .git/index NN &&
      cp .orig-A/NN NN &&
-     git-update-cache --add NN &&
+     git-update-index --add NN &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
 
@@ -501,7 +485,7 @@ test_expect_success \
     '15 - must match A in O && A && B && O==A && O==B case' \
     "rm -f .git/index NN &&
      cp .orig-A/NN NN &&
-     git-update-cache --add NN &&
+     git-update-index --add NN &&
      echo extra >>NN &&
      git-read-tree -m $tree_O $tree_A $tree_B &&
      check_result"
@@ -511,7 +495,20 @@ test_expect_failure \
     "rm -f .git/index NN &&
      cp .orig-A/NN NN &&
      echo extra >>NN &&
-     git-update-cache --add NN &&
+     git-update-index --add NN &&
      git-read-tree -m $tree_O $tree_A $tree_B"
+
+# #16
+test_expect_success \
+    '16 - A matches in one and B matches in another.' \
+    'rm -f .git/index F16 &&
+    echo F16 >F16 &&
+    git-update-index --add F16 &&
+    tree0=`git-write-tree` &&
+    echo E16 >F16 &&
+    git-update-index F16 &&
+    tree1=`git-write-tree` &&
+    git-read-tree -m $tree0 $tree1 $tree1 $tree0 &&
+    git-ls-files --stage'
 
 test_done

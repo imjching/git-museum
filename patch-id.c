@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include "cache.h"
 
 static void flush_current_id(int patchlen, unsigned char *id, SHA_CTX *c)
@@ -55,6 +54,10 @@ static void generate_id_list(void)
 		if (!patchlen && memcmp(line, "diff ", 5))
 			continue;
 
+		/* Ignore git-diff index header */
+		if (!memcmp(line, "index ", 6))
+			continue;
+
 		/* Ignore line numbers when computing the SHA1 of the patch */
 		if (!memcmp(line, "@@ -", 4))
 			continue;
@@ -67,7 +70,7 @@ static void generate_id_list(void)
 	flush_current_id(patchlen, sha1, &ctx);
 }
 
-static const char patch_id_usage[] = "usage: git-patch-id < patch";
+static const char patch_id_usage[] = "git-patch-id < patch";
 
 int main(int argc, char **argv)
 {

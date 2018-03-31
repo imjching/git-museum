@@ -5,8 +5,10 @@
 
 # For repeatability, reset the environment to known value.
 LANG=C
+LC_ALL=C
+PAGER=cat
 TZ=UTC
-export LANG TZ
+export LANG LC_ALL PAGER TZ
 unset AUTHOR_DATE
 unset AUTHOR_EMAIL
 unset AUTHOR_NAME
@@ -16,6 +18,7 @@ unset GIT_ALTERNATE_OBJECT_DIRECTORIES
 unset GIT_AUTHOR_DATE
 unset GIT_AUTHOR_EMAIL
 unset GIT_AUTHOR_NAME
+unset GIT_COMMITTER_DATE
 unset GIT_COMMITTER_EMAIL
 unset GIT_COMMITTER_NAME
 unset GIT_DIFF_OPTS
@@ -35,6 +38,7 @@ unset SHA1_FILE_DIRECTORY
 
 error () {
 	echo "* error: $*"
+	trap - exit
 	exit 1
 }
 
@@ -62,6 +66,7 @@ do
 	esac
 done
 
+exec 5>&1
 if test "$verbose" = "t"
 then
 	exec 4>&2 3>&1
@@ -71,6 +76,8 @@ fi
 
 test_failure=0
 test_count=0
+
+trap 'echo >&5 "FATAL: Unexpected exit with code $?"; exit 1' exit
 
 
 # You are not expected to call test_ok_ and test_failure_ directly, use
@@ -84,42 +91,66 @@ test_ok_ () {
 test_failure_ () {
 	test_count=$(expr "$test_count" + 1)
 	test_failure=$(expr "$test_failure" + 1);
-	say "FAIL $test_count: $@"
-	test "$immediate" == "" || exit 1
+	say "FAIL $test_count: $1"
+	shift
+	echo "$@" | sed -e 's/^/	/'
+	test "$immediate" = "" || { trap - exit; exit 1; }
 }
 
 
 test_debug () {
-	test "$debug" == "" || eval "$1"
+	test "$debug" = "" || eval "$1"
+}
+
+test_run_ () {
+	eval >&3 2>&4 "$1"
+	eval_ret="$?"
+	return 0
 }
 
 test_expect_failure () {
-	test "$#" == 2 ||
+	test "$#" = 2 ||
 	error "bug in the test script: not 2 parameters to test-expect-failure"
 	say >&3 "expecting failure: $2"
-	if eval >&3 2>&4 "$2"
+	test_run_ "$2"
+	if [ "$?" = 0 -a "$eval_ret" != 0 ]
 	then
-		test_failure_ "$@"
-	else
 		test_ok_ "$1"
+	else
+		test_failure_ "$@"
 	fi
 }
 
 test_expect_success () {
-	test "$#" == 2 ||
+	test "$#" = 2 ||
 	error "bug in the test script: not 2 parameters to test-expect-success"
 	say >&3 "expecting success: $2"
-	if eval >&3 2>&4 "$2"
+	test_run_ "$2"
+	if [ "$?" = 0 -a "$eval_ret" = 0 ]
 	then
 		test_ok_ "$1"
+	else
+		test_failure_ "$@"
+	fi
+}
+
+test_expect_code () {
+	test "$#" = 3 ||
+	error "bug in the test script: not 3 parameters to test-expect-code"
+	say >&3 "expecting exit code $1: $3"
+	test_run_ "$3"
+	if [ "$?" = 0 -a "$eval_ret" = "$1" ]
+	then
+		test_ok_ "$2"
 	else
 		test_failure_ "$@"
 	fi
 }
 
 test_done () {
+	trap - exit
 	case "$test_failure" in
-	0)	
+	0)
 		# We could:
 		# cd .. && rm -fr trash
 		# but that means we forbid any tests that use their own
@@ -141,10 +172,31 @@ test_done () {
 # Test the binaries we have just built.  The tests are kept in
 # t/ subdirectory and are run in trash subdirectory.
 PATH=$(pwd)/..:$PATH
+GIT_EXEC_PATH=$(pwd)/..
+export PATH GIT_EXEC_PATH
+
+# Similarly use ../compat/subprocess.py if our python does not
+# have subprocess.py on its own.
+PYTHON=`sed -e '1{
+	s/^#!//
+	q
+}' ../git-merge-recursive` || {
+	error "You haven't built things yet, have you?"
+}
+"$PYTHON" -c 'import subprocess' 2>/dev/null || {
+	PYTHONPATH=$(pwd)/../compat
+	export PYTHONPATH
+}
+test -d ../templates/blt || {
+	error "You haven't built things yet, have you?"
+}
 
 # Test repository
 test=trash
 rm -fr "$test"
 mkdir "$test"
 cd "$test"
-git-init-db 2>/dev/null || error "cannot run git-init-db"
+"$GIT_EXEC_PATH/git" init-db --template=../../templates/blt/ 2>/dev/null ||
+error "cannot run git init-db -- have you built things yet?"
+
+mv .git/hooks .git/hooks-disabled

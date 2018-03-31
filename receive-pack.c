@@ -1,11 +1,12 @@
 #include "cache.h"
 #include "refs.h"
 #include "pkt-line.h"
+#include "run-command.h"
 #include <sys/wait.h>
 
 static const char receive_pack_usage[] = "git-receive-pack <git-dir>";
 
-static const char *unpacker = "git-unpack-objects";
+static const char unpacker[] = "git-unpack-objects";
 
 static int show_ref(const char *path, const unsigned char *sha1)
 {
@@ -20,6 +21,7 @@ static void write_head_info(void)
 
 struct command {
 	struct command *next;
+	unsigned char updated;
 	unsigned char old_sha1[20];
 	unsigned char new_sha1[20];
 	char ref_name[0];
@@ -55,10 +57,47 @@ static int verify_old_ref(const char *name, char *hex_contents)
 	return 0;
 }
 
-static void update(const char *name, unsigned char *old_sha1, unsigned char *new_sha1)
+static char update_hook[] = "hooks/update";
+
+static int run_update_hook(const char *refname,
+			   char *old_hex, char *new_hex)
+{
+	int code;
+
+	if (access(update_hook, X_OK) < 0)
+		return 0;
+	code = run_command(update_hook, refname, old_hex, new_hex, NULL);
+	switch (code) {
+	case 0:
+		return 0;
+	case -ERR_RUN_COMMAND_FORK:
+		die("hook fork failed");
+	case -ERR_RUN_COMMAND_EXEC:
+		die("hook execute failed");
+	case -ERR_RUN_COMMAND_WAITPID:
+		die("waitpid failed");
+	case -ERR_RUN_COMMAND_WAITPID_WRONG_PID:
+		die("waitpid is confused");
+	case -ERR_RUN_COMMAND_WAITPID_SIGNAL:
+		fprintf(stderr, "%s died of signal", update_hook);
+		return -1;
+	case -ERR_RUN_COMMAND_WAITPID_NOEXIT:
+		die("%s died strangely", update_hook);
+	default:
+		error("%s exited with error code %d", update_hook, -code);
+		return -code;
+	}
+}
+
+static int update(const char *name,
+		  unsigned char *old_sha1, unsigned char *new_sha1)
 {
 	char new_hex[60], *old_hex, *lock_name;
 	int newfd, namelen, written;
+
+	if (!strncmp(name, "refs/", 5) && check_ref_format(name + 5))
+		return error("refusing to create funny ref '%s' locally",
+			     name);
 
 	namelen = strlen(name);
 	lock_name = xmalloc(namelen + 10);
@@ -68,11 +107,15 @@ static void update(const char *name, unsigned char *old_sha1, unsigned char *new
 	strcpy(new_hex, sha1_to_hex(new_sha1));
 	old_hex = sha1_to_hex(old_sha1);
 	if (!has_sha1_file(new_sha1))
-		die("unpack should have generated %s, but I can't find it!", new_hex);
+		return error("unpack should have generated %s, "
+			     "but I can't find it!", new_hex);
+
+	safe_create_leading_directories(lock_name);
 
 	newfd = open(lock_name, O_CREAT | O_EXCL | O_WRONLY, 0666);
 	if (newfd < 0)
-		die("unable to create %s (%s)", lock_name, strerror(errno));
+		return error("unable to create %s (%s)",
+			     lock_name, strerror(errno));
 
 	/* Write the ref with an ending '\n' */
 	new_hex[40] = '\n';
@@ -84,19 +127,54 @@ static void update(const char *name, unsigned char *old_sha1, unsigned char *new
 	close(newfd);
 	if (written != 41) {
 		unlink(lock_name);
-		die("unable to write %s", lock_name);
+		return error("unable to write %s", lock_name);
 	}
 	if (verify_old_ref(name, old_hex) < 0) {
 		unlink(lock_name);
-		die("%s changed during push", name);
+		return error("%s changed during push", name);
 	}
-	if (rename(lock_name, name) < 0) {
+	if (run_update_hook(name, old_hex, new_hex)) {
 		unlink(lock_name);
-		die("unable to replace %s", name);
+		return error("hook declined to update %s\n", name);
 	}
-	fprintf(stderr, "%s: %s -> %s\n", name, old_hex, new_hex);
+	else if (rename(lock_name, name) < 0) {
+		unlink(lock_name);
+		return error("unable to replace %s", name);
+	}
+	else {
+		fprintf(stderr, "%s: %s -> %s\n", name, old_hex, new_hex);
+		return 0;
+	}
 }
 
+static char update_post_hook[] = "hooks/post-update";
+
+static void run_update_post_hook(struct command *cmd)
+{
+	struct command *cmd_p;
+	int argc;
+	char **argv;
+
+	if (access(update_post_hook, X_OK) < 0)
+		return;
+	for (argc = 1, cmd_p = cmd; cmd_p; cmd_p = cmd_p->next) {
+		if (!cmd_p->updated)
+			continue;
+		argc++;
+	}
+	argv = xmalloc(sizeof(*argv) * (1 + argc));
+	argv[0] = update_post_hook;
+
+	for (argc = 1, cmd_p = cmd; cmd_p; cmd_p = cmd_p->next) {
+		if (!cmd_p->updated)
+			continue;
+		argv[argc] = xmalloc(strlen(cmd_p->ref_name) + 1);
+		strcpy(argv[argc], cmd_p->ref_name);
+		argc++;
+	}
+	argv[argc] = NULL;
+	run_command_v_opt(argc, argv, RUN_COMMAND_NO_STDIO);
+}
 
 /*
  * This gets called after(if) we've successfully
@@ -107,9 +185,11 @@ static void execute_commands(void)
 	struct command *cmd = commands;
 
 	while (cmd) {
-		update(cmd->ref_name, cmd->old_sha1, cmd->new_sha1);
+		cmd->updated = !update(cmd->ref_name,
+				       cmd->old_sha1, cmd->new_sha1);
 		cmd = cmd->next;
 	}
+	run_update_post_hook(commands);
 }
 
 static void read_head_info(void)
@@ -144,45 +224,35 @@ static void read_head_info(void)
 
 static void unpack(void)
 {
-	pid_t pid = fork();
-
-	if (pid < 0)
-		die("unpack fork failed");
-	if (!pid) {
-		execlp(unpacker, unpacker, NULL);
-		die("unpack execute failed");
-	}
-
-	for (;;) {
-		int status, code;
-		int retval = waitpid(pid, &status, 0);
-
-		if (retval < 0) {
-			if (errno == EINTR)
-				continue;
-			die("waitpid failed (%s)", strerror(retval));
-		}
-		if (retval != pid)
-			die("waitpid is confused");
-		if (WIFSIGNALED(status))
-			die("%s died of signal %d", unpacker, WTERMSIG(status));
-		if (!WIFEXITED(status))
-			die("%s died out of really strange complications", unpacker);
-		code = WEXITSTATUS(status);
-		if (code)
-			die("%s exited with error code %d", unpacker, code);
+	int code = run_command(unpacker, NULL);
+	switch (code) {
+	case 0:
 		return;
+	case -ERR_RUN_COMMAND_FORK:
+		die("unpack fork failed");
+	case -ERR_RUN_COMMAND_EXEC:
+		die("unpack execute failed");
+	case -ERR_RUN_COMMAND_WAITPID:
+		die("waitpid failed");
+	case -ERR_RUN_COMMAND_WAITPID_WRONG_PID:
+		die("waitpid is confused");
+	case -ERR_RUN_COMMAND_WAITPID_SIGNAL:
+		die("%s died of signal", unpacker);
+	case -ERR_RUN_COMMAND_WAITPID_NOEXIT:
+		die("%s died strangely", unpacker);
+	default:
+		die("%s exited with error code %d", unpacker, -code);
 	}
 }
 
 int main(int argc, char **argv)
 {
 	int i;
-	const char *dir = NULL;
+	char *dir = NULL;
 
 	argv++;
 	for (i = 1; i < argc; i++) {
-		const char *arg = *argv++;
+		char *arg = *argv++;
 
 		if (*arg == '-') {
 			/* Do flag handling here */
@@ -195,18 +265,9 @@ int main(int argc, char **argv)
 	if (!dir)
 		usage(receive_pack_usage);
 
-	/* chdir to the directory. If that fails, try appending ".git" */
-	if (chdir(dir) < 0) {
-		if (chdir(mkpath("%s.git", dir)) < 0)
-			die("unable to cd to %s", dir);
-	}
+	if(!enter_repo(dir, 0))
+		die("'%s': unable to chdir or not a git archive", dir);
 
-	/* If we have a ".git" directory, chdir to it */
-	chdir(".git");
-	setenv("GIT_DIR", ".", 1);
-
-	if (access("objects", X_OK) < 0 || access("refs/heads", X_OK) < 0)
-		die("%s doesn't appear to be a git directory", dir);
 	write_head_info();
 
 	/* EOF */

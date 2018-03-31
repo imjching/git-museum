@@ -3,7 +3,7 @@
  *
  * Copyright (C) Linus Torvalds, 2005
  */
-#include "cache.h"
+#include "git-compat-util.h"
 
 static void report(const char *prefix, const char *err, va_list params)
 {
@@ -15,7 +15,7 @@ static void report(const char *prefix, const char *err, va_list params)
 void usage(const char *err)
 {
 	fprintf(stderr, "usage: %s\n", err);
-	exit(1);
+	exit(129);
 }
 
 void die(const char *err, ...)
@@ -25,7 +25,7 @@ void die(const char *err, ...)
 	va_start(params, err);
 	report("fatal: ", err, params);
 	va_end(params);
-	exit(1);
+	exit(128);
 }
 
 int error(const char *err, ...)

@@ -1,6 +1,5 @@
 git-diff-tree(1)
 ================
-v0.1, May 2005
 
 NAME
 ----
@@ -9,16 +8,21 @@ git-diff-tree - Compares the content and mode of blobs found via two tree object
 
 SYNOPSIS
 --------
-'git-diff-tree' [-p] [-r] [-z] [--stdin] [-m] [-s] [-v] [-t] [-R] [-B] [-M] [-C] [--find-copies-harder] [-O<orderfile>] [-S<string>] [--pickaxe-all] <tree-ish> <tree-ish> [<path>...]
+'git-diff-tree' [--stdin] [-m] [-s] [-v] [--no-commit-id] [--pretty] [-t] [-r] [--root] [<common diff options>] <tree-ish> [<tree-ish>] [<path>...]
 
 DESCRIPTION
 -----------
 Compares the content and mode of the blobs found via two tree objects.
 
+If there is only one <tree-ish> given, the commit is compared with its parents
+(see --stdin below).
+
 Note that "git-diff-tree" can use the tree encapsulated in a commit object.
 
 OPTIONS
 -------
+include::diff-options.txt[]
+
 <tree-ish>::
 	The id of a tree object.
 
@@ -29,50 +33,11 @@ OPTIONS
 	Note that this parameter does not provide any wildcard or regexp
 	features.
 
--p::
-	generate patch (see section on generating patches).  For
-	git-diff-tree, this flag implies '-r' as well.
-
--B::
-	Break complete rewrite changes into pairs of delete and create.
-
--M::
-	Detect renames.
-
--C::
-	Detect copies as well as renames.
-
---find-copies-harder::
-	By default, -C option finds copies only if the original
-	file of the copy was modified in the same changeset for
-	performance reasons.  This flag makes the command
-	inspect unmodified files as candidates for the source of
-	copy.  This is a very expensive operation for large
-	projects, so use it with caution.
-
--R::
-	Swap two input trees.
-
--S<string>::
-	Look for differences that contains the change in <string>.
-
---pickaxe-all::
-	When -S finds a change, show all the changes in that
-	changeset, not just the files that contains the change
-	in <string>.
-
--O<orderfile>::
-	Output the patch in the order specified in the
-	<orderfile>, which has one shell glob pattern per line.
-
 -r::
-	recurse
+        recurse into sub-trees
 
 -t::
 	show tree entry itself as well as subtrees.  Implies -r.
-
--z::
-	\0 line termination on output
 
 --root::
 	When '--root' is specified the initial commit will be showed as a big
@@ -109,6 +74,10 @@ separated with a single space are given.
 	commit message.  Without "=<style>", it defaults to
 	medium.
 
+--no-commit-id::
+	git-diff-tree outputs a line with the commit ID when
+	applicable.  This flag suppressed the commit ID output.
+
 
 Limiting Output
 ---------------
@@ -126,28 +95,30 @@ Or if you are searching for what changed in just `kernel/sched.c`, just do
 and it will ignore all differences to other files.
 
 The pattern is always the prefix, and is matched exactly.  There are no
-wildcards.  Even stricter, it has to match complete path comonent.
+wildcards.  Even stricter, it has to match a complete path component.
 I.e. "foo" does not pick up `foobar.h`.  "foo" does match `foo/bar.h`
 so it can be used to name subdirectories.
 
 An example of normal usage is:
 
   torvalds@ppc970:~/git> git-diff-tree 5319e4......
-  *100664->100664 blob    ac348b.......->a01513.......      git-fsck-cache.c
+  *100664->100664 blob    ac348b.......->a01513.......      git-fsck-objects.c
 
 which tells you that the last commit changed just one file (it's from
 this one:
 
-  commit 3c6f7ca19ad4043e9e72fa94106f352897e651a8
-  tree 5319e4d609cdd282069cc4dce33c1db559539b03
-  parent b4e628ea30d5ab3606119d2ea5caeab141d38df7
-  author Linus Torvalds <torvalds@ppc970.osdl.org> Sat Apr 9 12:02:30 2005
-  committer Linus Torvalds <torvalds@ppc970.osdl.org> Sat Apr 9 12:02:30 2005
+-----------------------------------------------------------------------------
+commit 3c6f7ca19ad4043e9e72fa94106f352897e651a8
+tree 5319e4d609cdd282069cc4dce33c1db559539b03
+parent b4e628ea30d5ab3606119d2ea5caeab141d38df7
+author Linus Torvalds <torvalds@ppc970.osdl.org> Sat Apr 9 12:02:30 2005
+committer Linus Torvalds <torvalds@ppc970.osdl.org> Sat Apr 9 12:02:30 2005
 
-  Make "git-fsck-cache" print out all the root commits it finds.
+Make "git-fsck-objects" print out all the root commits it finds.
 
-  Once I do the reference tracking, I'll also make it print out all the
-  HEAD commits it finds, which is even more interesting.
+Once I do the reference tracking, I'll also make it print out all the
+HEAD commits it finds, which is even more interesting.
+-----------------------------------------------------------------------------
 
 in case you care).
 
@@ -166,5 +137,5 @@ Documentation by David Greaves, Junio C Hamano and the git-list <git@vger.kernel
 
 GIT
 ---
-Part of the link:git.html[git] suite
+Part of the gitlink:git[7] suite
 

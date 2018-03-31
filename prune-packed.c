@@ -1,6 +1,9 @@
 #include "cache.h"
 
-static const char prune_packed_usage[] = "git-prune-packed: usage: git-prune-packed";
+static const char prune_packed_usage[] =
+"git-prune-packed [-n]";
+
+static int dryrun;
 
 static void prune_dir(int i, DIR *dir, char *pathname, int len)
 {
@@ -18,9 +21,13 @@ static void prune_dir(int i, DIR *dir, char *pathname, int len)
 		if (!has_sha1_pack(sha1))
 			continue;
 		memcpy(pathname + len, de->d_name, 38);
-		if (unlink(pathname) < 0)
+		if (dryrun)
+			printf("rm -f %s\n", pathname);
+		else if (unlink(pathname) < 0)
 			error("unable to unlink %s", pathname);
 	}
+	pathname[len] = 0;
+	rmdir(pathname);
 }
 
 static void prune_packed_objects(void)
@@ -41,7 +48,7 @@ static void prune_packed_objects(void)
 		sprintf(pathname + len, "%02x/", i);
 		d = opendir(pathname);
 		if (!d)
-			die("unable to open %s", pathname);
+			continue;
 		prune_dir(i, d, pathname, len + 3);
 		closedir(d);
 	}
@@ -51,16 +58,22 @@ int main(int argc, char **argv)
 {
 	int i;
 
+	setup_git_directory();
+
 	for (i = 1; i < argc; i++) {
 		const char *arg = argv[i];
 
 		if (*arg == '-') {
-			/* Handle flags here .. */
-			usage(prune_packed_usage);
+			if (!strcmp(arg, "-n"))
+				dryrun = 1;
+			else
+				usage(prune_packed_usage);
+			continue;
 		}
 		/* Handle arguments here .. */
 		usage(prune_packed_usage);
 	}
+	sync();
 	prune_packed_objects();
 	return 0;
 }

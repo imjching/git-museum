@@ -1,56 +1,17 @@
 #include "cache.h"
 #include "refs.h"
 #include "pkt-line.h"
-#include <sys/wait.h>
 
-static int quiet;
-static const char clone_pack_usage[] = "git-clone-pack [host:]directory [heads]*";
+static const char clone_pack_usage[] =
+"git-clone-pack [--exec=<git-upload-pack>] [<host>:]<directory> [<heads>]*";
 static const char *exec = "git-upload-pack";
-
-struct ref {
-	struct ref *next;
-	unsigned char sha1[20];
-	char name[0];
-};
-
-static struct ref *get_remote_refs(int fd, int nr_match, char **match)
-{
-	struct ref *ref_list = NULL, **next_ref = &ref_list;
-
-	for (;;) {
-		static char line[1000];
-		unsigned char sha1[20];
-		struct ref *ref;
-		char *refname;
-		int len;
-
-		len = packet_read_line(fd, line, sizeof(line));
-		if (!len)
-			break;
-		if (line[len-1] == '\n')
-			line[--len] = 0;
-		if (len < 42 || get_sha1_hex(line, sha1))
-			die("git-fetch-pack: protocol error - expected ref descriptor, got '%s¤'", line);
-		refname = line+41;
-		len = len-40;
-		if (nr_match && !path_match(refname, nr_match, match))
-			continue;
-		ref = xmalloc(sizeof(struct ref) + len);
-		ref->next = NULL;
-		memcpy(ref->sha1, sha1, 20);
-		memcpy(ref->name, refname, len);
-		*next_ref = ref;
-		next_ref = &ref->next;
-	}
-	return ref_list;
-}
 
 static void clone_handshake(int fd[2], struct ref *ref)
 {
 	unsigned char sha1[20];
 
 	while (ref) {
-		packet_write(fd[1], "want %s\n", sha1_to_hex(ref->sha1));
+		packet_write(fd[1], "want %s\n", sha1_to_hex(ref->old_sha1));
 		ref = ref->next;
 	}
 	packet_flush(fd[1]);
@@ -68,16 +29,22 @@ static int is_master(struct ref *ref)
 
 static void write_one_ref(struct ref *ref)
 {
-	char *path = git_path(ref->name);
+	char *path = git_path("%s", ref->name);
 	int fd;
 	char *hex;
+
+	if (!strncmp(ref->name, "refs/", 5) &&
+	    check_ref_format(ref->name + 5)) {
+		error("refusing to create funny ref '%s' locally", ref->name);
+		return;
+	}
 
 	if (safe_create_leading_directories(path))
 		die("unable to create leading directory for %s", ref->name);
 	fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0666);
 	if (fd < 0)
 		die("unable to create ref %s", ref->name);
-	hex = sha1_to_hex(ref->sha1);
+	hex = sha1_to_hex(ref->old_sha1);
 	hex[40] = '\n';
 	if (write(fd, hex, 41) != 41)
 		die("unable to write ref %s", ref->name);
@@ -89,6 +56,7 @@ static void write_refs(struct ref *ref)
 	struct ref *head = NULL, *head_ptr, *master_ref;
 	char *head_path;
 
+	/* Upload-pack must report HEAD first */
 	if (!strcmp(ref->name, "HEAD")) {
 		head = ref;
 		ref = ref->next;
@@ -98,17 +66,21 @@ static void write_refs(struct ref *ref)
 	while (ref) {
 		if (is_master(ref))
 			master_ref = ref;
-		if (head && !memcmp(ref->sha1, head->sha1, 20)) {
-			if (!head_ptr || ref == master_ref)
-				head_ptr = ref;
-		}
+		if (head &&
+		    !memcmp(ref->old_sha1, head->old_sha1, 20) &&
+		    !strncmp(ref->name, "refs/heads/",11) &&
+		    (!head_ptr || ref == master_ref))
+			head_ptr = ref;
+
 		write_one_ref(ref);
 		ref = ref->next;
 	}
-	if (!head)
+	if (!head) {
+		fprintf(stderr, "No HEAD in remote.\n");
 		return;
+	}
 
-	head_path = git_path("HEAD");
+	head_path = strdup(git_path("HEAD"));
 	if (!head_ptr) {
 		/*
 		 * If we had a master ref, and it wasn't HEAD, we need to undo the
@@ -120,6 +92,7 @@ static void write_refs(struct ref *ref)
 			unlink(head_path);
 		}
 		write_one_ref(head);
+		free(head_path);
 		return;
 	}
 
@@ -127,56 +100,43 @@ static void write_refs(struct ref *ref)
 	if (master_ref)
 		return;
 
+	fprintf(stderr, "Setting HEAD to %s\n", head_ptr->name);
+
 	/*
 	 * Uhhuh. Other end didn't have master. We start HEAD off with
 	 * the first branch with the same value.
 	 */
-	unlink(head_path);
-	if (symlink(head_ptr->name, head_path) < 0)
+	if (create_symref(head_path, head_ptr->name) < 0)
 		die("unable to link HEAD to %s", head_ptr->name);
+	free(head_path);
 }
 
 static int clone_pack(int fd[2], int nr_match, char **match)
 {
 	struct ref *refs;
 	int status;
-	pid_t pid;
 
-	refs = get_remote_refs(fd[0], nr_match, match);
+	get_remote_heads(fd[0], &refs, nr_match, match, 1);
 	if (!refs) {
 		packet_flush(fd[1]);
 		die("no matching remote head");
 	}
 	clone_handshake(fd, refs);
-	pid = fork();
-	if (pid < 0)
-		die("git-clone-pack: unable to fork off git-unpack-objects");
-	if (!pid) {
-		close(fd[1]);
-		dup2(fd[0], 0);
-		close(fd[0]);
-		execlp("git-unpack-objects", "git-unpack-objects",
-			quiet ? "-q" : NULL, NULL);
-		die("git-unpack-objects exec failed");
+
+	status = receive_keep_pack(fd, "git-clone-pack");
+
+	if (!status) {
+		if (nr_match == 0)
+			write_refs(refs);
+		else
+			while (refs) {
+				printf("%s %s\n",
+				       sha1_to_hex(refs->old_sha1),
+				       refs->name);
+				refs = refs->next;
+			}
 	}
-	close(fd[0]);
-	close(fd[1]);
-	while (waitpid(pid, &status, 0) < 0) {
-		if (errno != EINTR)
-			die("waiting for git-unpack-objects: %s", strerror(errno));
-	}
-	if (WIFEXITED(status)) {
-		int code = WEXITSTATUS(status);
-		if (code)
-			die("git-unpack-objects died with error code %d", code);
-		write_refs(refs);
-		return 0;
-	}
-	if (WIFSIGNALED(status)) {
-		int sig = WTERMSIG(status);
-		die("git-unpack-objects died of signal %d", sig);
-	}
-	die("Sherlock Holmes! git-unpack-objects died of unnatural causes %d!", status);
+	return status;
 }
 
 int main(int argc, char **argv)
@@ -186,14 +146,18 @@ int main(int argc, char **argv)
 	int fd[2];
 	pid_t pid;
 
+	setup_git_directory();
+
 	nr_heads = 0;
 	heads = NULL;
 	for (i = 1; i < argc; i++) {
 		char *arg = argv[i];
 
 		if (*arg == '-') {
-			if (!strcmp("-q", arg)) {
-				quiet = 1;
+			if (!strcmp("-q", arg))
+				continue;
+			if (!strncmp("--exec=", arg, 7)) {
+				exec = arg + 7;
 				continue;
 			}
 			usage(clone_pack_usage);

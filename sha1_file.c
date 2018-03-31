@@ -20,6 +20,8 @@
 #endif
 #endif
 
+const unsigned char null_sha1[20] = { 0, };
+
 static unsigned int sha1_file_open_flag = O_NOATIME;
 
 static unsigned hexval(char c)
@@ -46,65 +48,11 @@ int get_sha1_hex(const char *hex, unsigned char *sha1)
 	return 0;
 }
 
-static int get_sha1_file(const char *path, unsigned char *result)
-{
-	char buffer[60];
-	int fd = open(path, O_RDONLY);
-	int len;
-
-	if (fd < 0)
-		return -1;
-	len = read(fd, buffer, sizeof(buffer));
-	close(fd);
-	if (len < 40)
-		return -1;
-	return get_sha1_hex(buffer, result);
-}
-
-static char *git_dir, *git_object_dir, *git_index_file, *git_refs_dir;
-static void setup_git_env(void)
-{
-	git_dir = gitenv(GIT_DIR_ENVIRONMENT);
-	if (!git_dir)
-		git_dir = DEFAULT_GIT_DIR_ENVIRONMENT;
-	git_object_dir = gitenv(DB_ENVIRONMENT);
-	if (!git_object_dir) {
-		git_object_dir = xmalloc(strlen(git_dir) + 9);
-		sprintf(git_object_dir, "%s/objects", git_dir);
-	}
-	git_refs_dir = xmalloc(strlen(git_dir) + 6);
-	sprintf(git_refs_dir, "%s/refs", git_dir);
-	git_index_file = gitenv(INDEX_ENVIRONMENT);
-	if (!git_index_file) {
-		git_index_file = xmalloc(strlen(git_dir) + 7);
-		sprintf(git_index_file, "%s/index", git_dir);
-	}
-}
-
-char *get_object_directory(void)
-{
-	if (!git_object_dir)
-		setup_git_env();
-	return git_object_dir;
-}
-
-char *get_refs_directory(void)
-{
-	if (!git_refs_dir)
-		setup_git_env();
-	return git_refs_dir;
-}
-
-char *get_index_file(void)
-{
-	if (!git_index_file)
-		setup_git_env();
-	return git_index_file;
-}
-
 int safe_create_leading_directories(char *path)
 {
 	char *pos = path;
+	if (*pos == '/')
+		pos++;
 
 	while (pos) {
 		pos = strchr(pos, '/');
@@ -119,30 +67,6 @@ int safe_create_leading_directories(char *path)
 		*pos++ = '/';
 	}
 	return 0;
-}
-
-int get_sha1(const char *str, unsigned char *sha1)
-{
-	static const char *prefix[] = {
-		"",
-		"refs",
-		"refs/tags",
-		"refs/heads",
-		"refs/snap",
-		NULL
-	};
-	const char **p;
-
-	if (!get_sha1_hex(str, sha1))
-		return 0;
-
-	for (p = prefix; *p; p++) {
-		char * pathname = git_path("%s/%s", *p, str);
-		if (!get_sha1_file(pathname, sha1))
-			return 0;
-	}
-
-	return -1;
 }
 
 char * sha1_to_hex(const unsigned char *sha1)
@@ -200,84 +124,189 @@ char *sha1_file_name(const unsigned char *sha1)
 	return base;
 }
 
-struct alternate_object_database *alt_odb;
+char *sha1_pack_name(const unsigned char *sha1)
+{
+	static const char hex[] = "0123456789abcdef";
+	static char *name, *base, *buf;
+	int i;
+
+	if (!base) {
+		const char *sha1_file_directory = get_object_directory();
+		int len = strlen(sha1_file_directory);
+		base = xmalloc(len + 60);
+		sprintf(base, "%s/pack/pack-1234567890123456789012345678901234567890.pack", sha1_file_directory);
+		name = base + len + 11;
+	}
+
+	buf = name;
+
+	for (i = 0; i < 20; i++) {
+		unsigned int val = *sha1++;
+		*buf++ = hex[val >> 4];
+		*buf++ = hex[val & 0xf];
+	}
+	
+	return base;
+}
+
+char *sha1_pack_index_name(const unsigned char *sha1)
+{
+	static const char hex[] = "0123456789abcdef";
+	static char *name, *base, *buf;
+	int i;
+
+	if (!base) {
+		const char *sha1_file_directory = get_object_directory();
+		int len = strlen(sha1_file_directory);
+		base = xmalloc(len + 60);
+		sprintf(base, "%s/pack/pack-1234567890123456789012345678901234567890.idx", sha1_file_directory);
+		name = base + len + 11;
+	}
+
+	buf = name;
+
+	for (i = 0; i < 20; i++) {
+		unsigned int val = *sha1++;
+		*buf++ = hex[val >> 4];
+		*buf++ = hex[val & 0xf];
+	}
+	
+	return base;
+}
+
+struct alternate_object_database *alt_odb_list;
+static struct alternate_object_database **alt_odb_tail;
 
 /*
  * Prepare alternate object database registry.
- * alt_odb points at an array of struct alternate_object_database.
- * This array is terminated with an element that has both its base
- * and name set to NULL.  alt_odb[n] comes from n'th non-empty
- * element from colon separated ALTERNATE_DB_ENVIRONMENT environment
- * variable, and its base points at a statically allocated buffer
- * that contains "/the/directory/corresponding/to/.git/objects/...",
- * while its name points just after the slash at the end of
- * ".git/objects/" in the example above, and has enough space to hold
- * 40-byte hex SHA1, an extra slash for the first level indirection,
- * and the terminating NUL.
- * This function allocates the alt_odb array and all the strings
- * pointed by base fields of the array elements with one xmalloc();
- * the string pool immediately follows the array.
+ *
+ * The variable alt_odb_list points at the list of struct
+ * alternate_object_database.  The elements on this list come from
+ * non-empty elements from colon separated ALTERNATE_DB_ENVIRONMENT
+ * environment variable, and $GIT_OBJECT_DIRECTORY/info/alternates,
+ * whose contents is similar to that environment variable but can be
+ * LF separated.  Its base points at a statically allocated buffer that
+ * contains "/the/directory/corresponding/to/.git/objects/...", while
+ * its name points just after the slash at the end of ".git/objects/"
+ * in the example above, and has enough space to hold 40-byte hex
+ * SHA1, an extra slash for the first level indirection, and the
+ * terminating NUL.
  */
+static void link_alt_odb_entries(const char *alt, const char *ep, int sep,
+				 const char *relative_base)
+{
+	const char *cp, *last;
+	struct alternate_object_database *ent;
+	const char *objdir = get_object_directory();
+	int base_len = -1;
+
+	last = alt;
+	while (last < ep) {
+		cp = last;
+		if (cp < ep && *cp == '#') {
+			while (cp < ep && *cp != sep)
+				cp++;
+			last = cp + 1;
+			continue;
+		}
+		for ( ; cp < ep && *cp != sep; cp++)
+			;
+		if (last != cp) {
+			struct alternate_object_database *alt;
+			/* 43 = 40-byte + 2 '/' + terminating NUL */
+			int pfxlen = cp - last;
+			int entlen = pfxlen + 43;
+
+			if (*last != '/' && relative_base) {
+				/* Relative alt-odb */
+				if (base_len < 0)
+					base_len = strlen(relative_base) + 1;
+				entlen += base_len;
+				pfxlen += base_len;
+			}
+			ent = xmalloc(sizeof(*ent) + entlen);
+
+			if (*last != '/' && relative_base) {
+				memcpy(ent->base, relative_base, base_len - 1);
+				ent->base[base_len - 1] = '/';
+				memcpy(ent->base + base_len,
+				       last, cp - last);
+			}
+			else
+				memcpy(ent->base, last, pfxlen);
+			ent->name = ent->base + pfxlen + 1;
+			ent->base[pfxlen] = ent->base[pfxlen + 3] = '/';
+			ent->base[entlen-1] = 0;
+
+			/* Prevent the common mistake of listing the same
+			 * thing twice, or object directory itself.
+			 */
+			for (alt = alt_odb_list; alt; alt = alt->next)
+				if (!memcmp(ent->base, alt->base, pfxlen))
+					goto bad;
+			if (!memcmp(ent->base, objdir, pfxlen)) {
+			bad:
+				free(ent);
+			}
+			else {
+				*alt_odb_tail = ent;
+				alt_odb_tail = &(ent->next);
+				ent->next = NULL;
+			}
+		}
+		while (cp < ep && *cp == sep)
+			cp++;
+		last = cp;
+	}
+}
+
 void prepare_alt_odb(void)
 {
-	int pass, totlen, i;
-	const char *cp, *last;
-	char *op = NULL;
-	const char *alt = gitenv(ALTERNATE_DB_ENVIRONMENT) ? : "";
+	char path[PATH_MAX];
+	char *map;
+	int fd;
+	struct stat st;
+	char *alt;
 
-	if (alt_odb)
+	alt = getenv(ALTERNATE_DB_ENVIRONMENT);
+	if (!alt) alt = "";
+
+	if (alt_odb_tail)
 		return;
-	/* The first pass counts how large an area to allocate to
-	 * hold the entire alt_odb structure, including array of
-	 * structs and path buffers for them.  The second pass fills
-	 * the structure and prepares the path buffers for use by
-	 * fill_sha1_path().
-	 */
-	for (totlen = pass = 0; pass < 2; pass++) {
-		last = alt;
-		i = 0;
-		do {
-			cp = strchr(last, ':') ? : last + strlen(last);
-			if (last != cp) {
-				/* 43 = 40-byte + 2 '/' + terminating NUL */
-				int pfxlen = cp - last;
-				int entlen = pfxlen + 43;
-				if (pass == 0)
-					totlen += entlen;
-				else {
-					alt_odb[i].base = op;
-					alt_odb[i].name = op + pfxlen + 1;
-					memcpy(op, last, pfxlen);
-					op[pfxlen] = op[pfxlen + 3] = '/';
-					op[entlen-1] = 0;
-					op += entlen;
-				}
-				i++;
-			}
-			while (*cp && *cp == ':')
-				cp++;
-			last = cp;
-		} while (*cp);
-		if (pass)
-			break;
-		alt_odb = xmalloc(sizeof(*alt_odb) * (i + 1) + totlen);
-		alt_odb[i].base = alt_odb[i].name = NULL;
-		op = (char*)(&alt_odb[i+1]);
+	alt_odb_tail = &alt_odb_list;
+	link_alt_odb_entries(alt, alt + strlen(alt), ':', NULL);
+
+	sprintf(path, "%s/info/alternates", get_object_directory());
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return;
+	if (fstat(fd, &st) || (st.st_size == 0)) {
+		close(fd);
+		return;
 	}
+	map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (map == MAP_FAILED)
+		return;
+
+	link_alt_odb_entries(map, map + st.st_size, '\n',
+			     get_object_directory());
+	munmap(map, st.st_size);
 }
 
 static char *find_sha1_file(const unsigned char *sha1, struct stat *st)
 {
-	int i;
 	char *name = sha1_file_name(sha1);
+	struct alternate_object_database *alt;
 
 	if (!stat(name, st))
 		return name;
 	prepare_alt_odb();
-	for (i = 0; (name = alt_odb[i].name) != NULL; i++) {
+	for (alt = alt_odb_list; alt; alt = alt->next) {
+		name = alt->name;
 		fill_sha1_path(name, sha1);
-		if (!stat(alt_odb[i].base, st))
-			return alt_odb[i].base;
+		if (!stat(alt->base, st))
+			return alt->base;
 	}
 	return NULL;
 }
@@ -360,6 +389,14 @@ void unuse_packed_git(struct packed_git *p)
 
 int use_packed_git(struct packed_git *p)
 {
+	if (!p->pack_size) {
+		struct stat st;
+		// We created the struct before we had the pack
+		stat(p->pack_name, &st);
+		if (!S_ISREG(st.st_mode))
+			die("packfile %s not a regular file", p->pack_name);
+		p->pack_size = st.st_size;
+	}
 	if (!p->pack_base) {
 		int fd;
 		struct stat st;
@@ -387,20 +424,23 @@ int use_packed_git(struct packed_git *p)
 		 * this is cheap.
 		 */
 		if (memcmp((char*)(p->index_base) + p->index_size - 40,
-			   p->pack_base + p->pack_size - 20, 20))
+			   p->pack_base + p->pack_size - 20, 20)) {
+			      
 			die("packfile %s does not match index.", p->pack_name);
+		}
 	}
 	p->pack_last_used = pack_used_ctr++;
 	p->pack_use_cnt++;
 	return 0;
 }
 
-struct packed_git *add_packed_git(char *path, int path_len)
+struct packed_git *add_packed_git(char *path, int path_len, int local)
 {
 	struct stat st;
 	struct packed_git *p;
 	unsigned long idx_size;
 	void *idx_map;
+	unsigned char sha1[20];
 
 	if (check_packed_git_idx(path, &idx_size, &idx_map))
 		return NULL;
@@ -423,10 +463,50 @@ struct packed_git *add_packed_git(char *path, int path_len)
 	p->pack_base = NULL;
 	p->pack_last_used = 0;
 	p->pack_use_cnt = 0;
+	p->pack_local = local;
+	if (!get_sha1_hex(path + path_len - 40 - 4, sha1))
+		memcpy(p->sha1, sha1, 20);
 	return p;
 }
 
-static void prepare_packed_git_one(char *objdir)
+struct packed_git *parse_pack_index(unsigned char *sha1)
+{
+	char *path = sha1_pack_index_name(sha1);
+	return parse_pack_index_file(sha1, path);
+}
+
+struct packed_git *parse_pack_index_file(const unsigned char *sha1, char *idx_path)
+{
+	struct packed_git *p;
+	unsigned long idx_size;
+	void *idx_map;
+	char *path;
+
+	if (check_packed_git_idx(idx_path, &idx_size, &idx_map))
+		return NULL;
+
+	path = sha1_pack_name(sha1);
+
+	p = xmalloc(sizeof(*p) + strlen(path) + 2);
+	strcpy(p->pack_name, path);
+	p->index_size = idx_size;
+	p->pack_size = 0;
+	p->index_base = idx_map;
+	p->next = NULL;
+	p->pack_base = NULL;
+	p->pack_last_used = 0;
+	p->pack_use_cnt = 0;
+	memcpy(p->sha1, sha1, 20);
+	return p;
+}
+
+void install_packed_git(struct packed_git *pack)
+{
+	pack->next = packed_git;
+	packed_git = pack;
+}
+
+static void prepare_packed_git_one(char *objdir, int local)
 {
 	char path[PATH_MAX];
 	int len;
@@ -448,7 +528,7 @@ static void prepare_packed_git_one(char *objdir)
 
 		/* we have .idx.  Is it a file we can map? */
 		strcpy(path + len, de->d_name);
-		p = add_packed_git(path, len + namelen);
+		p = add_packed_git(path, len + namelen, local);
 		if (!p)
 			continue;
 		p->next = packed_git;
@@ -459,18 +539,19 @@ static void prepare_packed_git_one(char *objdir)
 
 void prepare_packed_git(void)
 {
-	int i;
 	static int run_once = 0;
+	struct alternate_object_database *alt;
 
-	if (run_once++)
+	if (run_once)
 		return;
-
-	prepare_packed_git_one(get_object_directory());
+	prepare_packed_git_one(get_object_directory(), 1);
 	prepare_alt_odb();
-	for (i = 0; alt_odb[i].base != NULL; i++) {
-		alt_odb[i].name[0] = 0;
-		prepare_packed_git_one(alt_odb[i].base);
+	for (alt = alt_odb_list; alt; alt = alt->next) {
+		alt->name[-1] = 0;
+		prepare_packed_git_one(alt->base, 0);
+		alt->name[-1] = '/';
 	}
+	run_once = 1;
 }
 
 int check_sha1_signature(const unsigned char *sha1, void *map, unsigned long size, const char *type)
@@ -518,7 +599,7 @@ static void *map_sha1_file_internal(const unsigned char *sha1,
 	}
 	map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
-	if (-1 == (int)(long)map)
+	if (map == MAP_FAILED)
 		return NULL;
 	*size = st.st_size;
 	return map;
@@ -756,7 +837,8 @@ void packed_object_info_detail(struct pack_entry *e,
 		strcpy(type, "tag");
 		break;
 	default:
-		die("corrupted pack file");
+		die("corrupted pack file %s containing object of kind %d",
+		    p->pack_name, kind);
 	}
 	*store_size = 0; /* notyet */
 }
@@ -795,7 +877,8 @@ static int packed_object_info(struct pack_entry *entry,
 		strcpy(type, "tag");
 		break;
 	default:
-		die("corrupted pack file");
+		die("corrupted pack file %s containing object of kind %d",
+		    p->pack_name, kind);
 	}
 	if (sizep)
 		*sizep = size;
@@ -895,7 +978,7 @@ static void *unpack_entry(struct pack_entry *entry,
 	retval = unpack_entry_gently(entry, type, sizep);
 	unuse_packed_git(p);
 	if (!retval)
-		die("corrupted pack file");
+		die("corrupted pack file %s", p->pack_name);
 	return retval;
 }
 
@@ -989,6 +1072,20 @@ static int find_pack_entry(const unsigned char *sha1, struct pack_entry *e)
 	return 0;
 }
 
+struct packed_git *find_sha1_pack(const unsigned char *sha1, 
+				  struct packed_git *packs)
+{
+	struct packed_git *p;
+	struct pack_entry e;
+
+	for (p = packs; p; p = p->next) {
+		if (find_pack_entry_one(sha1, &e, p))
+			return p;
+	}
+	return NULL;
+	
+}
+
 int sha1_object_info(const unsigned char *sha1, char *type, unsigned long *sizep)
 {
 	int status;
@@ -1035,14 +1132,17 @@ void * read_sha1_file(const unsigned char *sha1, char *type, unsigned long *size
 {
 	unsigned long mapsize;
 	void *map, *buf;
+	struct pack_entry e;
 
+	if (find_pack_entry(sha1, &e))
+		return read_packed_sha1(sha1, type, size);
 	map = map_sha1_file_internal(sha1, &mapsize);
 	if (map) {
 		buf = unpack_sha1_file(map, mapsize, type, size);
 		munmap(map, mapsize);
 		return buf;
 	}
-	return read_packed_sha1(sha1, type, size);
+	return NULL;
 }
 
 void *read_object_with_reference(const unsigned char *sha1,
@@ -1085,6 +1185,7 @@ void *read_object_with_reference(const unsigned char *sha1,
 			free(buffer);
 			return NULL;
 		}
+		free(buffer);
 		/* Now we have the ID of the referred-to object in
 		 * actual_sha1.  Check again. */
 	}
@@ -1111,6 +1212,77 @@ char *write_sha1_file_prepare(void *buf,
 	return sha1_file_name(sha1);
 }
 
+/*
+ * Link the tempfile to the final place, possibly creating the
+ * last directory level as you do so.
+ *
+ * Returns the errno on failure, 0 on success.
+ */
+static int link_temp_to_file(const char *tmpfile, char *filename)
+{
+	int ret;
+
+	if (!link(tmpfile, filename))
+		return 0;
+
+	/*
+	 * Try to mkdir the last path component if that failed
+	 * with an ENOENT.
+	 *
+	 * Re-try the "link()" regardless of whether the mkdir
+	 * succeeds, since a race might mean that somebody
+	 * else succeeded.
+	 */
+	ret = errno;
+	if (ret == ENOENT) {
+		char *dir = strrchr(filename, '/');
+		if (dir) {
+			*dir = 0;
+			mkdir(filename, 0777);
+			*dir = '/';
+			if (!link(tmpfile, filename))
+				return 0;
+			ret = errno;
+		}
+	}
+	return ret;
+}
+
+/*
+ * Move the just written object into its final resting place
+ */
+int move_temp_to_file(const char *tmpfile, char *filename)
+{
+	int ret = link_temp_to_file(tmpfile, filename);
+
+	/*
+	 * Coda hack - coda doesn't like cross-directory links,
+	 * so we fall back to a rename, which will mean that it
+	 * won't be able to check collisions, but that's not a
+	 * big deal.
+	 *
+	 * The same holds for FAT formatted media.
+	 *
+	 * When this succeeds, we just return 0. We have nothing
+	 * left to unlink.
+	 */
+	if (ret && ret != EEXIST) {
+		if (!rename(tmpfile, filename))
+			return 0;
+		ret = errno;
+	}
+	unlink(tmpfile);
+	if (ret) {
+		if (ret != EEXIST) {
+			fprintf(stderr, "unable to write sha1 filename %s: %s", filename, strerror(ret));
+			return -1;
+		}
+		/* FIXME!!! Collision check here ? */
+	}
+
+	return 0;
+}
+
 int write_sha1_file(void *buf, unsigned long len, const char *type, unsigned char *returnsha1)
 {
 	int size;
@@ -1120,7 +1292,7 @@ int write_sha1_file(void *buf, unsigned long len, const char *type, unsigned cha
 	char *filename;
 	static char tmpfile[PATH_MAX];
 	unsigned char hdr[50];
-	int fd, hdrlen, ret;
+	int fd, hdrlen;
 
 	/* Normally if we have it in the pack then we do not bother writing
 	 * it out into .git/objects/??/?{38} file.
@@ -1183,32 +1355,7 @@ int write_sha1_file(void *buf, unsigned long len, const char *type, unsigned cha
 	close(fd);
 	free(compressed);
 
-	ret = link(tmpfile, filename);
-	if (ret < 0) {
-		ret = errno;
-
-		/*
-		 * Coda hack - coda doesn't like cross-directory links,
-		 * so we fall back to a rename, which will mean that it
-		 * won't be able to check collisions, but that's not a
-		 * big deal.
-		 *
-		 * When this succeeds, we just return 0. We have nothing
-		 * left to unlink.
-		 */
-		if (ret == EXDEV && !rename(tmpfile, filename))
-			return 0;
-	}
-	unlink(tmpfile);
-	if (ret) {
-		if (ret != EEXIST) {
-			fprintf(stderr, "unable to write sha1 filename %s: %s", filename, strerror(ret));
-			return -1;
-		}
-		/* FIXME!!! Collision check here ? */
-	}
-
-	return 0;
+	return move_temp_to_file(tmpfile, filename);
 }
 
 int write_sha1_to_fd(int fd, const unsigned char *sha1)
@@ -1216,8 +1363,11 @@ int write_sha1_to_fd(int fd, const unsigned char *sha1)
 	ssize_t size;
 	unsigned long objsize;
 	int posn = 0;
-	void *buf = map_sha1_file_internal(sha1, &objsize);
+	void *map = map_sha1_file_internal(sha1, &objsize);
+	void *buf = map;
+	void *temp_obj = NULL;
 	z_stream stream;
+
 	if (!buf) {
 		unsigned char *unpacked;
 		unsigned long len;
@@ -1233,7 +1383,7 @@ int write_sha1_to_fd(int fd, const unsigned char *sha1)
 		memset(&stream, 0, sizeof(stream));
 		deflateInit(&stream, Z_BEST_COMPRESSION);
 		size = deflateBound(&stream, len + hdrlen);
-		buf = xmalloc(size);
+		temp_obj = buf = xmalloc(size);
 
 		/* Compress it */
 		stream.next_out = buf;
@@ -1251,6 +1401,7 @@ int write_sha1_to_fd(int fd, const unsigned char *sha1)
 		while (deflate(&stream, Z_FINISH) == Z_OK)
 			/* nothing */;
 		deflateEnd(&stream);
+		free(unpacked);
 		
 		objsize = stream.total_out;
 	}
@@ -1267,25 +1418,31 @@ int write_sha1_to_fd(int fd, const unsigned char *sha1)
 		}
 		posn += size;
 	} while (posn < objsize);
+
+	if (map)
+		munmap(map, objsize);
+	if (temp_obj)
+		free(temp_obj);
+
 	return 0;
 }
 
-int write_sha1_from_fd(const unsigned char *sha1, int fd)
+int write_sha1_from_fd(const unsigned char *sha1, int fd, char *buffer,
+		       size_t bufsize, size_t *bufposn)
 {
-	char *filename = sha1_file_name(sha1);
-
+	char tmpfile[PATH_MAX];
 	int local;
 	z_stream stream;
 	unsigned char real_sha1[20];
-	unsigned char buf[4096];
 	unsigned char discard[4096];
 	int ret;
 	SHA_CTX c;
 
-	local = open(filename, O_WRONLY | O_CREAT | O_EXCL, 0666);
+	snprintf(tmpfile, sizeof(tmpfile), "%s/obj_XXXXXX", get_object_directory());
 
+	local = mkstemp(tmpfile);
 	if (local < 0)
-		return error("Couldn't open %s\n", filename);
+		return error("Couldn't open %s for %s\n", tmpfile, sha1_to_hex(sha1));
 
 	memset(&stream, 0, sizeof(stream));
 
@@ -1295,41 +1452,64 @@ int write_sha1_from_fd(const unsigned char *sha1, int fd)
 
 	do {
 		ssize_t size;
-		size = read(fd, buf, 4096);
+		if (*bufposn) {
+			stream.avail_in = *bufposn;
+			stream.next_in = (unsigned char *) buffer;
+			do {
+				stream.next_out = discard;
+				stream.avail_out = sizeof(discard);
+				ret = inflate(&stream, Z_SYNC_FLUSH);
+				SHA1_Update(&c, discard, sizeof(discard) -
+					    stream.avail_out);
+			} while (stream.avail_in && ret == Z_OK);
+			write(local, buffer, *bufposn - stream.avail_in);
+			memmove(buffer, buffer + *bufposn - stream.avail_in,
+				stream.avail_in);
+			*bufposn = stream.avail_in;
+			if (ret != Z_OK)
+				break;
+		}
+		size = read(fd, buffer + *bufposn, bufsize - *bufposn);
 		if (size <= 0) {
 			close(local);
-			unlink(filename);
+			unlink(tmpfile);
 			if (!size)
 				return error("Connection closed?");
 			perror("Reading from connection");
 			return -1;
 		}
-		write(local, buf, size);
-		stream.avail_in = size;
-		stream.next_in = buf;
-		do {
-			stream.next_out = discard;
-			stream.avail_out = sizeof(discard);
-			ret = inflate(&stream, Z_SYNC_FLUSH);
-			SHA1_Update(&c, discard, sizeof(discard) -
-				    stream.avail_out);
-		} while (stream.avail_in && ret == Z_OK);
-		
-	} while (ret == Z_OK);
+		*bufposn += size;
+	} while (1);
 	inflateEnd(&stream);
 
 	close(local);
 	SHA1_Final(real_sha1, &c);
 	if (ret != Z_STREAM_END) {
-		unlink(filename);
+		unlink(tmpfile);
 		return error("File %s corrupted", sha1_to_hex(sha1));
 	}
 	if (memcmp(sha1, real_sha1, 20)) {
-		unlink(filename);
+		unlink(tmpfile);
 		return error("File %s has bad hash\n", sha1_to_hex(sha1));
 	}
-	
-	return 0;
+
+	return move_temp_to_file(tmpfile, sha1_file_name(sha1));
+}
+
+int has_pack_index(const unsigned char *sha1)
+{
+	struct stat st;
+	if (stat(sha1_pack_index_name(sha1), &st))
+		return 0;
+	return 1;
+}
+
+int has_pack_file(const unsigned char *sha1)
+{
+	struct stat st;
+	if (stat(sha1_pack_name(sha1), &st))
+		return 0;
+	return 1;
 }
 
 int has_sha1_pack(const unsigned char *sha1)
@@ -1343,9 +1523,43 @@ int has_sha1_file(const unsigned char *sha1)
 	struct stat st;
 	struct pack_entry e;
 
-	if (find_sha1_file(sha1, &st))
+	if (find_pack_entry(sha1, &e))
 		return 1;
-	return find_pack_entry(sha1, &e);
+	return find_sha1_file(sha1, &st) ? 1 : 0;
+}
+
+int index_pipe(unsigned char *sha1, int fd, const char *type, int write_object)
+{
+	unsigned long size = 4096;
+	char *buf = malloc(size);
+	int iret, ret;
+	unsigned long off = 0;
+	unsigned char hdr[50];
+	int hdrlen;
+	do {
+		iret = read(fd, buf + off, size - off);
+		if (iret > 0) {
+			off += iret;
+			if (off == size) {
+				size *= 2;
+				buf = realloc(buf, size);
+			}
+		}
+	} while (iret > 0);
+	if (iret < 0) {
+		free(buf);
+		return -1;
+	}
+	if (!type)
+		type = "blob";
+	if (write_object)
+		ret = write_sha1_file(buf, off, type, sha1);
+	else {
+		write_sha1_file_prepare(buf, off, type, sha1, hdr, &hdrlen);
+		ret = 0;
+	}
+	free(buf);
+	return ret;
 }
 
 int index_fd(unsigned char *sha1, int fd, struct stat *st, int write_object, const char *type)
@@ -1360,7 +1574,7 @@ int index_fd(unsigned char *sha1, int fd, struct stat *st, int write_object, con
 	if (size)
 		buf = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
-	if ((int)(long)buf == -1)
+	if (buf == MAP_FAILED)
 		return -1;
 
 	if (!type)
@@ -1374,4 +1588,43 @@ int index_fd(unsigned char *sha1, int fd, struct stat *st, int write_object, con
 	if (size)
 		munmap(buf, size);
 	return ret;
+}
+
+int index_path(unsigned char *sha1, const char *path, struct stat *st, int write_object)
+{
+	int fd;
+	char *target;
+
+	switch (st->st_mode & S_IFMT) {
+	case S_IFREG:
+		fd = open(path, O_RDONLY);
+		if (fd < 0)
+			return error("open(\"%s\"): %s", path,
+				     strerror(errno));
+		if (index_fd(sha1, fd, st, write_object, NULL) < 0)
+			return error("%s: failed to insert into database",
+				     path);
+		break;
+	case S_IFLNK:
+		target = xmalloc(st->st_size+1);
+		if (readlink(path, target, st->st_size+1) != st->st_size) {
+			char *errstr = strerror(errno);
+			free(target);
+			return error("readlink(\"%s\"): %s", path,
+			             errstr);
+		}
+		if (!write_object) {
+			unsigned char hdr[50];
+			int hdrlen;
+			write_sha1_file_prepare(target, st->st_size, "blob",
+						sha1, hdr, &hdrlen);
+		} else if (write_sha1_file(target, st->st_size, "blob", sha1))
+			return error("%s: failed to insert into database",
+				     path);
+		free(target);
+		break;
+	default:
+		return error("%s: unsupported file type", path);
+	}
+	return 0;
 }

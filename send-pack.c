@@ -1,16 +1,16 @@
 #include "cache.h"
+#include "commit.h"
+#include "tag.h"
 #include "refs.h"
 #include "pkt-line.h"
 
-static const char send_pack_usage[] = "git-send-pack [--exec=other] destination [heads]*";
+static const char send_pack_usage[] =
+"git-send-pack [--all] [--exec=git-receive-pack] <remote> [<head>...]\n"
+"  --all and explicit <head> specification are mutually exclusive.";
 static const char *exec = "git-receive-pack";
-
-struct ref {
-	struct ref *next;
-	unsigned char old_sha1[20];
-	unsigned char new_sha1[20];
-	char name[0];
-};
+static int verbose = 0;
+static int send_all = 0;
+static int force_update = 0;
 
 static int is_zero_sha1(const unsigned char *sha1)
 {
@@ -45,7 +45,8 @@ static void exec_rev_list(struct ref *refs)
 		char *buf = malloc(100);
 		if (i > 900)
 			die("git-rev-list environment overflow");
-		if (!is_zero_sha1(refs->old_sha1)) {
+		if (!is_zero_sha1(refs->old_sha1) &&
+		    has_sha1_file(refs->old_sha1)) {
 			args[i++] = buf;
 			snprintf(buf, 50, "^%s", sha1_to_hex(refs->old_sha1));
 			buf += 50;
@@ -105,153 +106,178 @@ static int pack_objects(int fd, struct ref *refs)
 	return 0;
 }
 
-static int read_ref(const char *ref, unsigned char *sha1)
+static void unmark_and_free(struct commit_list *list, unsigned int mark)
 {
-	int fd, ret;
-	char buffer[60];
-
-	fd = open(git_path("%s", ref), O_RDONLY);
-	if (fd < 0)
-		return -1;
-	ret = -1;
-	if (read(fd, buffer, sizeof(buffer)) >= 40)
-		ret = get_sha1_hex(buffer, sha1);
-	close(fd);
-	return ret;
+	while (list) {
+		struct commit_list *temp = list;
+		temp->item->object.flags &= ~mark;
+		list = temp->next;
+		free(temp);
+	}
 }
 
-static int ref_newer(const unsigned char *new_sha1, const unsigned char *old_sha1)
+static int ref_newer(const unsigned char *new_sha1,
+		     const unsigned char *old_sha1)
 {
-	if (!has_sha1_file(old_sha1))
-		return 0;
-	/*
-	 * FIXME! It is not correct to say that the new one is newer
-	 * just because we don't have the old one!
-	 *
-	 * We should really see if we can reach the old_sha1 commit
-	 * from the new_sha1 one.
+	struct object *o;
+	struct commit *old, *new;
+	struct commit_list *list, *used;
+	int found = 0;
+
+	/* Both new and old must be commit-ish and new is descendant of
+	 * old.  Otherwise we require --force.
 	 */
-	return 1;
+	o = deref_tag(parse_object(old_sha1), NULL, 0);
+	if (!o || o->type != commit_type)
+		return 0;
+	old = (struct commit *) o;
+
+	o = deref_tag(parse_object(new_sha1), NULL, 0);
+	if (!o || o->type != commit_type)
+		return 0;
+	new = (struct commit *) o;
+
+	if (parse_commit(new) < 0)
+		return 0;
+
+	used = list = NULL;
+	commit_list_insert(new, &list);
+	while (list) {
+		new = pop_most_recent_commit(&list, 1);
+		commit_list_insert(new, &used);
+		if (new == old) {
+			found = 1;
+			break;
+		}
+	}
+	unmark_and_free(list, 1);
+	unmark_and_free(used, 1);
+	return found;
 }
 
-static int local_ref_nr_match;
-static char **local_ref_match;
-static struct ref **local_ref_list;
+static struct ref *local_refs, **local_tail;
+static struct ref *remote_refs, **remote_tail;
 
-static int try_to_match(const char *refname, const unsigned char *sha1)
+static int one_local_ref(const char *refname, const unsigned char *sha1)
 {
 	struct ref *ref;
-	int len;
-
-	if (!path_match(refname, local_ref_nr_match, local_ref_match))
-		return 0;
-
-	len = strlen(refname)+1;
-	ref = xmalloc(sizeof(*ref) + len);
-	memset(ref->old_sha1, 0, 20);
+	int len = strlen(refname) + 1;
+	ref = xcalloc(1, sizeof(*ref) + len);
 	memcpy(ref->new_sha1, sha1, 20);
 	memcpy(ref->name, refname, len);
-	ref->next = NULL;
-	*local_ref_list = ref;
-	local_ref_list = &ref->next;
+	*local_tail = ref;
+	local_tail = &ref->next;
 	return 0;
 }
 
-static int send_pack(int in, int out, int nr_match, char **match)
+static void get_local_heads(void)
 {
-	struct ref *ref_list = NULL, **last_ref = &ref_list;
+	local_tail = &local_refs;
+	for_each_ref(one_local_ref);
+}
+
+static int send_pack(int in, int out, int nr_refspec, char **refspec)
+{
 	struct ref *ref;
 	int new_refs;
+	int ret = 0;
 
-	/*
-	 * Read all the refs from the other end
-	 */
-	for (;;) {
-		unsigned char old_sha1[20];
-		static char buffer[1000];
-		char *name;
-		int len;
+	/* No funny business with the matcher */
+	remote_tail = get_remote_heads(in, &remote_refs, 0, NULL, 1);
+	get_local_heads();
 
-		len = packet_read_line(in, buffer, sizeof(buffer));
-		if (!len)
-			break;
-		if (buffer[len-1] == '\n')
-			buffer[--len] = 0;
+	/* match them up */
+	if (!remote_tail)
+		remote_tail = &remote_refs;
+	if (match_refs(local_refs, remote_refs, &remote_tail,
+		       nr_refspec, refspec, send_all))
+		return -1;
 
-		if (len < 42 || get_sha1_hex(buffer, old_sha1) || buffer[40] != ' ')
-			die("protocol error: expected sha/ref, got '%s'", buffer);
-		name = buffer + 41;
-		ref = xmalloc(sizeof(*ref) + len - 40);
-		memcpy(ref->old_sha1, old_sha1, 20);
-		memset(ref->new_sha1, 0, 20);
-		memcpy(ref->name, buffer + 41, len - 40);
-		ref->next = NULL;
-		*last_ref = ref;
-		last_ref = &ref->next;
-	}
-
-	/*
-	 * Go through the refs, see if we want to update
-	 * any of them..
-	 */
-	for (ref = ref_list; ref; ref = ref->next) {
-		unsigned char new_sha1[20];
-		char *name = ref->name;
-
-		if (nr_match && !path_match(name, nr_match, match))
-			continue;
-
-		if (read_ref(name, new_sha1) < 0)
-			continue;
-
-		if (nr_match && !path_match(name, nr_match, match))
-			continue;
-
-		if (!memcmp(ref->old_sha1, new_sha1, 20)) {
-			fprintf(stderr, "'%s' unchanged\n", name);
-			continue;
-		}
-
-		if (!ref_newer(new_sha1, ref->old_sha1)) {
-			error("remote '%s' points to object I don't have", name);
-			continue;
-		}
-
-		/* Ok, mark it for update */
-		memcpy(ref->new_sha1, new_sha1, 20);
-	}
-
-	/*
-	 * See if we have any refs that the other end didn't have
-	 */
-	if (nr_match) {
-		local_ref_nr_match = nr_match;
-		local_ref_match = match;
-		local_ref_list = last_ref;
-		for_each_ref(try_to_match);
+	if (!remote_refs) {
+		fprintf(stderr, "No refs in common and none specified; doing nothing.\n");
+		return 0;
 	}
 
 	/*
 	 * Finally, tell the other end!
 	 */
 	new_refs = 0;
-	for (ref = ref_list; ref; ref = ref->next) {
+	for (ref = remote_refs; ref; ref = ref->next) {
 		char old_hex[60], *new_hex;
-		if (is_zero_sha1(ref->new_sha1))
+		if (!ref->peer_ref)
 			continue;
+		if (!memcmp(ref->old_sha1, ref->peer_ref->new_sha1, 20)) {
+			if (verbose)
+				fprintf(stderr, "'%s': up-to-date\n", ref->name);
+			continue;
+		}
+
+		/* This part determines what can overwrite what.
+		 * The rules are:
+		 *
+		 * (0) you can always use --force or +A:B notation to
+		 *     selectively force individual ref pairs.
+		 *
+		 * (1) if the old thing does not exist, it is OK.
+		 *
+		 * (2) if you do not have the old thing, you are not allowed
+		 *     to overwrite it; you would not know what you are losing
+		 *     otherwise.
+		 *
+		 * (3) if both new and old are commit-ish, and new is a
+		 *     descendant of old, it is OK.
+		 */
+
+		if (!force_update &&
+		    !is_zero_sha1(ref->old_sha1) &&
+		    !ref->force) {
+			if (!has_sha1_file(ref->old_sha1)) {
+				error("remote '%s' object %s does not "
+				      "exist on local",
+				      ref->name, sha1_to_hex(ref->old_sha1));
+				ret = -2;
+				continue;
+			}
+
+			/* We assume that local is fsck-clean.  Otherwise
+			 * you _could_ have an old tag which points at
+			 * something you do not have, which may or may not
+			 * be a commit.
+			 */
+			if (!ref_newer(ref->peer_ref->new_sha1,
+				       ref->old_sha1)) {
+				error("remote ref '%s' is not a strict "
+				      "subset of local ref '%s'.", ref->name,
+				      ref->peer_ref->name);
+				ret = -2;
+				continue;
+			}
+		}
+		memcpy(ref->new_sha1, ref->peer_ref->new_sha1, 20);
+		if (is_zero_sha1(ref->new_sha1)) {
+			error("cannot happen anymore");
+			ret = -3;
+			continue;
+		}
 		new_refs++;
 		strcpy(old_hex, sha1_to_hex(ref->old_sha1));
 		new_hex = sha1_to_hex(ref->new_sha1);
 		packet_write(out, "%s %s %s", old_hex, new_hex, ref->name);
-		fprintf(stderr, "'%s': updating from %s to %s\n", ref->name, old_hex, new_hex);
+		fprintf(stderr, "updating '%s'", ref->name);
+		if (strcmp(ref->name, ref->peer_ref->name))
+			fprintf(stderr, " using '%s'", ref->peer_ref->name);
+		fprintf(stderr, "\n  from %s\n  to   %s\n", old_hex, new_hex);
 	}
-	
+
 	packet_flush(out);
 	if (new_refs)
-		pack_objects(out, ref_list);
+		pack_objects(out, remote_refs);
+	else
+		fprintf(stderr, "Everything up-to-date\n");
 	close(out);
-	return 0;
+	return ret;
 }
+
 
 int main(int argc, char **argv)
 {
@@ -261,23 +287,41 @@ int main(int argc, char **argv)
 	int fd[2], ret;
 	pid_t pid;
 
+	setup_git_directory();
 	argv++;
-	for (i = 1; i < argc; i++) {
-		char *arg = *argv++;
+	for (i = 1; i < argc; i++, argv++) {
+		char *arg = *argv;
 
 		if (*arg == '-') {
 			if (!strncmp(arg, "--exec=", 7)) {
 				exec = arg + 7;
 				continue;
 			}
+			if (!strcmp(arg, "--all")) {
+				send_all = 1;
+				continue;
+			}
+			if (!strcmp(arg, "--force")) {
+				force_update = 1;
+				continue;
+			}
+			if (!strcmp(arg, "--verbose")) {
+				verbose = 1;
+				continue;
+			}
 			usage(send_pack_usage);
 		}
-		dest = arg;
+		if (!dest) {
+			dest = arg;
+			continue;
+		}
 		heads = argv;
-		nr_heads = argc - i -1;
+		nr_heads = argc - i;
 		break;
 	}
 	if (!dest)
+		usage(send_pack_usage);
+	if (heads && send_all)
 		usage(send_pack_usage);
 	pid = git_connect(fd, dest, exec);
 	if (pid < 0)

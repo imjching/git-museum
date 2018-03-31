@@ -57,19 +57,10 @@ static void remove_subtree(const char *path)
 		die("cannot rmdir %s", path);
 }
 
-static int create_file(const char *path, unsigned int mode, int force)
+static int create_file(const char *path, unsigned int mode)
 {
-	int fd;
-
 	mode = (mode & 0100) ? 0777 : 0666;
-	fd = open(path, O_WRONLY | O_TRUNC | O_CREAT, mode);
-	if (fd < 0) {
-		if (errno == EISDIR && force) {
-			remove_subtree(path);
-			fd = open(path, O_WRONLY | O_TRUNC | O_CREAT, mode);
-		}
-	}
-	return fd;
+	return open(path, O_WRONLY | O_TRUNC | O_CREAT | O_EXCL, mode);
 }
 
 static int write_entry(struct cache_entry *ce, const char *path, struct checkout *state)
@@ -85,36 +76,36 @@ static int write_entry(struct cache_entry *ce, const char *path, struct checkout
 	if (!new || strcmp(type, "blob")) {
 		if (new)
 			free(new);
-		return error("git-checkout-cache: unable to read sha1 file of %s (%s)",
+		return error("git-checkout-index: unable to read sha1 file of %s (%s)",
 			path, sha1_to_hex(ce->sha1));
 	}
 	switch (ntohl(ce->ce_mode) & S_IFMT) {
 	case S_IFREG:
-		fd = create_file(path, ntohl(ce->ce_mode), state->force);
+		fd = create_file(path, ntohl(ce->ce_mode));
 		if (fd < 0) {
 			free(new);
-			return error("git-checkout-cache: unable to create file %s (%s)",
+			return error("git-checkout-index: unable to create file %s (%s)",
 				path, strerror(errno));
 		}
 		wrote = write(fd, new, size);
 		close(fd);
 		free(new);
 		if (wrote != size)
-			return error("git-checkout-cache: unable to write file %s", path);
+			return error("git-checkout-index: unable to write file %s", path);
 		break;
 	case S_IFLNK:
 		memcpy(target, new, size);
 		target[size] = '\0';
 		if (symlink(target, path)) {
 			free(new);
-			return error("git-checkout-cache: unable to create symlink %s (%s)",
+			return error("git-checkout-index: unable to create symlink %s (%s)",
 				path, strerror(errno));
 		}
 		free(new);
 		break;
 	default:
 		free(new);
-		return error("git-checkout-cache: unknown file mode for %s", path);
+		return error("git-checkout-index: unknown file mode for %s", path);
 	}
 
 	if (state->refresh_cache) {
@@ -140,8 +131,8 @@ int checkout_entry(struct cache_entry *ce, struct checkout *state)
 			return 0;
 		if (!state->force) {
 			if (!state->quiet)
-				fprintf(stderr, "git-checkout-cache: %s already exists\n", path);
-			return 0;
+				fprintf(stderr, "git-checkout-index: %s already exists\n", path);
+			return -1;
 		}
 
 		/*
@@ -151,6 +142,11 @@ int checkout_entry(struct cache_entry *ce, struct checkout *state)
 		 * just do the right thing)
 		 */
 		unlink(path);
+		if (S_ISDIR(st.st_mode)) {
+			if (!state->force)
+				return error("%s is a directory", path);
+			remove_subtree(path);
+		}
 	} else if (state->not_new) 
 		return 0;
 	create_directories(path, state);

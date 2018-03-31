@@ -3,24 +3,125 @@
 
 #include <errno.h>
 
-static int read_ref(const char *refname, unsigned char *sha1)
-{
-	int ret = -1;
-	int fd = open(git_path(refname), O_RDONLY);
+/* We allow "recursive" symbolic refs. Only within reason, though */
+#define MAXDEPTH 5
 
-	if (fd >= 0) {
-		char buffer[60];
-		if (read(fd, buffer, sizeof(buffer)) >= 40)
-			ret = get_sha1_hex(buffer, sha1);
+#ifndef USE_SYMLINK_HEAD
+#define USE_SYMLINK_HEAD 1
+#endif
+
+const char *resolve_ref(const char *path, unsigned char *sha1, int reading)
+{
+	int depth = MAXDEPTH, len;
+	char buffer[256];
+
+	for (;;) {
+		struct stat st;
+		char *buf;
+		int fd;
+
+		if (--depth < 0)
+			return NULL;
+
+		/* Special case: non-existing file.
+		 * Not having the refs/heads/new-branch is OK
+		 * if we are writing into it, so is .git/HEAD
+		 * that points at refs/heads/master still to be
+		 * born.  It is NOT OK if we are resolving for
+		 * reading.
+		 */
+		if (lstat(path, &st) < 0) {
+			if (reading || errno != ENOENT)
+				return NULL;
+			memset(sha1, 0, 20);
+			return path;
+		}
+
+		/* Follow "normalized" - ie "refs/.." symlinks by hand */
+		if (S_ISLNK(st.st_mode)) {
+			len = readlink(path, buffer, sizeof(buffer)-1);
+			if (len >= 5 && !memcmp("refs/", buffer, 5)) {
+				path = git_path("%.*s", len, buffer);
+				continue;
+			}
+		}
+
+		/*
+		 * Anything else, just open it and try to use it as
+		 * a ref
+		 */
+		fd = open(path, O_RDONLY);
+		if (fd < 0)
+			return NULL;
+		len = read(fd, buffer, sizeof(buffer)-1);
 		close(fd);
+
+		/*
+		 * Is it a symbolic ref?
+		 */
+		if (len < 4 || memcmp("ref:", buffer, 4))
+			break;
+		buf = buffer + 4;
+		len -= 4;
+		while (len && isspace(*buf))
+			buf++, len--;
+		while (len && isspace(buf[len-1]))
+			buf[--len] = 0;
+		path = git_path("%.*s", len, buf);
 	}
-	return ret;
+	if (len < 40 || get_sha1_hex(buffer, sha1))
+		return NULL;
+	return path;
+}
+
+int create_symref(const char *git_HEAD, const char *refs_heads_master)
+{
+	const char *lockpath;
+	char ref[1000];
+	int fd, len, written;
+
+#if USE_SYMLINK_HEAD
+	if (!only_use_symrefs) {
+		unlink(git_HEAD);
+		if (!symlink(refs_heads_master, git_HEAD))
+			return 0;
+		fprintf(stderr, "no symlink - falling back to symbolic ref\n");
+	}
+#endif
+
+	len = snprintf(ref, sizeof(ref), "ref: %s\n", refs_heads_master);
+	if (sizeof(ref) <= len) {
+		error("refname too long: %s", refs_heads_master);
+		return -1;
+	}
+	lockpath = mkpath("%s.lock", git_HEAD);
+	fd = open(lockpath, O_CREAT | O_EXCL | O_WRONLY, 0666);	
+	written = write(fd, ref, len);
+	close(fd);
+	if (written != len) {
+		unlink(lockpath);
+		error("Unable to write to %s", lockpath);
+		return -2;
+	}
+	if (rename(lockpath, git_HEAD) < 0) {
+		unlink(lockpath);
+		error("Unable to create %s", git_HEAD);
+		return -3;
+	}
+	return 0;
+}
+
+int read_ref(const char *filename, unsigned char *sha1)
+{
+	if (resolve_ref(filename, sha1, 1))
+		return 0;
+	return -1;
 }
 
 static int do_for_each_ref(const char *base, int (*fn)(const char *path, const unsigned char *sha1))
 {
 	int retval = 0;
-	DIR *dir = opendir(git_path(base));
+	DIR *dir = opendir(git_path("%s", base));
 
 	if (dir) {
 		struct dirent *de;
@@ -46,7 +147,7 @@ static int do_for_each_ref(const char *base, int (*fn)(const char *path, const u
 			if (namelen > 255)
 				continue;
 			memcpy(path + baselen, de->d_name, namelen+1);
-			if (lstat(git_path(path), &st) < 0)
+			if (stat(git_path("%s", path), &st) < 0)
 				continue;
 			if (S_ISDIR(st.st_mode)) {
 				retval = do_for_each_ref(path, fn);
@@ -54,7 +155,7 @@ static int do_for_each_ref(const char *base, int (*fn)(const char *path, const u
 					break;
 				continue;
 			}
-			if (read_ref(path, sha1) < 0)
+			if (read_ref(git_path("%s", path), sha1) < 0)
 				continue;
 			if (!has_sha1_file(sha1))
 				continue;
@@ -71,7 +172,7 @@ static int do_for_each_ref(const char *base, int (*fn)(const char *path, const u
 int head_ref(int (*fn)(const char *path, const unsigned char *sha1))
 {
 	unsigned char sha1[20];
-	if (!read_ref("HEAD", sha1))
+	if (!read_ref(git_path("HEAD"), sha1))
 		return fn("HEAD", sha1);
 	return 0;
 }
@@ -101,33 +202,14 @@ static char *ref_lock_file_name(const char *ref)
 	return ret;
 }
 
-static int read_ref_file(const char *filename, unsigned char *sha1) {
-	int fd = open(filename, O_RDONLY);
-	char hex[41];
-	if (fd < 0) {
-		return error("Couldn't open %s\n", filename);
-	}
-	if ((read(fd, hex, 41) < 41) ||
-	    (hex[40] != '\n') ||
-	    get_sha1_hex(hex, sha1)) {
-		error("Couldn't read a hash from %s\n", filename);
-		close(fd);
-		return -1;
-	}
-	close(fd);
-	return 0;
-}
-
 int get_ref_sha1(const char *ref, unsigned char *sha1)
 {
-	char *filename;
-	int retval;
+	const char *filename;
+
 	if (check_ref_format(ref))
 		return -1;
-	filename = ref_file_name(ref);
-	retval = read_ref_file(filename, sha1);
-	free(filename);
-	return retval;
+	filename = git_path("refs/%s", ref);
+	return read_ref(filename, sha1);
 }
 
 static int lock_ref_file(const char *filename, const char *lock_filename,
@@ -140,7 +222,7 @@ static int lock_ref_file(const char *filename, const char *lock_filename,
 		return error("Couldn't open lock file for %s: %s",
 			     filename, strerror(errno));
 	}
-	retval = read_ref_file(filename, current_sha1);
+	retval = read_ref(filename, current_sha1);
 	if (old_sha1) {
 		if (retval) {
 			close(fd);
@@ -210,23 +292,64 @@ int write_ref_sha1(const char *ref, int fd, const unsigned char *sha1)
 		return -1;
 	filename = ref_file_name(ref);
 	lock_filename = ref_lock_file_name(ref);
+	if (safe_create_leading_directories(filename))
+		die("unable to create leading directory for %s", filename);
 	retval = write_ref_file(filename, lock_filename, fd, sha1);
 	free(filename);
 	free(lock_filename);
 	return retval;
 }
 
+/*
+ * Make sure "ref" is something reasonable to have under ".git/refs/";
+ * We do not like it if:
+ *
+ * - any path component of it begins with ".", or
+ * - it has double dots "..", or
+ * - it has ASCII control character, "~", "^", ":" or SP, anywhere, or
+ * - it ends with a "/".
+ */
+
+static inline int bad_ref_char(int ch)
+{
+	return (((unsigned) ch) <= ' ' ||
+		ch == '~' || ch == '^' || ch == ':' ||
+		/* 2.13 Pattern Matching Notation */
+		ch == '?' || ch == '*' || ch == '[');
+}
+
 int check_ref_format(const char *ref)
 {
-	char *middle;
-	if (ref[0] == '.' || ref[0] == '/')
-		return -1;
-	middle = strchr(ref, '/');
-	if (!middle || !middle[1])
-		return -1;
-	if (strchr(middle + 1, '/'))
-		return -1;
-	return 0;
+	int ch, level;
+	const char *cp = ref;
+
+	level = 0;
+	while (1) {
+		while ((ch = *cp++) == '/')
+			; /* tolerate duplicated slashes */
+		if (!ch)
+			return -1; /* should not end with slashes */
+
+		/* we are at the beginning of the path component */
+		if (ch == '.' || bad_ref_char(ch))
+			return -1;
+
+		/* scan the rest of the path component */
+		while ((ch = *cp++) != 0) {
+			if (bad_ref_char(ch))
+				return -1;
+			if (ch == '/')
+				break;
+			if (ch == '.' && *cp == '.')
+				return -1;
+		}
+		level++;
+		if (!ch) {
+			if (level < 2)
+				return -1; /* at least of form "heads/blah" */
+			return 0;
+		}
+	}
 }
 
 int write_ref_sha1_unlocked(const char *ref, const unsigned char *sha1)
@@ -239,6 +362,8 @@ int write_ref_sha1_unlocked(const char *ref, const unsigned char *sha1)
 		return -1;
 	filename = ref_file_name(ref);
 	lock_filename = ref_lock_file_name(ref);
+	if (safe_create_leading_directories(filename))
+		die("unable to create leading directory for %s", filename);
 	fd = open(lock_filename, O_WRONLY | O_CREAT | O_EXCL, 0666);
 	if (fd < 0) {
 		error("Writing %s", lock_filename);

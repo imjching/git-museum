@@ -16,9 +16,9 @@ test_expect_success \
      for i in a b c
      do
 	     dd if=/dev/zero bs=4k count=1 | tr "\\0" $i >$i &&
-	     git-update-cache --add $i || exit
+	     git-update-index --add $i || return 1
      done &&
-     cat c >d && echo foo >>d && git-update-cache --add d &&
+     cat c >d && echo foo >>d && git-update-index --add d &&
      tree=`git-write-tree` &&
      commit=`git-commit-tree $tree </dev/null` && {
 	 echo $tree &&
@@ -29,7 +29,7 @@ test_expect_success \
 	 while read object
 	 do
 	    t=`git-cat-file -t $object` &&
-	    git-cat-file $t $object || exit 1
+	    git-cat-file $t $object || return 1
 	 done <obj-list
      } >expect'
 
@@ -49,7 +49,7 @@ test_expect_success \
      git-unpack-objects <test-1-${packname_1}.pack"
 
 unset GIT_OBJECT_DIRECTORY
-cd $TRASH/.git2
+cd "$TRASH/.git2"
 
 test_expect_success \
     'check unpack without delta' \
@@ -58,10 +58,10 @@ test_expect_success \
      do
          cmp $path ../.git/$path || {
 	     echo $path differs.
-	     exit 1
+	     return 1
 	 }
      done'
-cd $TRASH
+cd "$TRASH"
 
 test_expect_success \
     'pack with delta' \
@@ -80,7 +80,7 @@ test_expect_success \
      git-unpack-objects <test-2-${packname_2}.pack'
 
 unset GIT_OBJECT_DIRECTORY
-cd $TRASH/.git2
+cd "$TRASH/.git2"
 test_expect_success \
     'check unpack with delta' \
     '(cd ../.git && find objects -type f -print) |
@@ -88,10 +88,10 @@ test_expect_success \
      do
          cmp $path ../.git/$path || {
 	     echo $path differs.
-	     exit 1
+	     return 1
 	 }
      done'
-cd $TRASH
+cd "$TRASH"
 
 rm -fr .git2
 mkdir .git2
@@ -106,7 +106,7 @@ test_expect_success \
 	 while read object
 	 do
 	    t=`git-cat-file -t $object` &&
-	    git-cat-file $t $object || exit 1
+	    git-cat-file $t $object || return 1
 	 done <obj-list
     } >current &&
     diff expect current'
@@ -122,7 +122,7 @@ test_expect_success \
 	 while read object
 	 do
 	    t=`git-cat-file -t $object` &&
-	    git-cat-file $t $object || exit 1
+	    git-cat-file $t $object || return 1
 	 done <obj-list
     } >current &&
     diff expect current'
@@ -162,6 +162,24 @@ test_expect_success \
      then false
      else :;
      fi &&
+
+     :'
+
+test_expect_success \
+    'build pack index for an existing pack' \
+    'cp test-1-${packname_1}.pack test-3.pack &&
+     git-index-pack -o tmp.idx test-3.pack &&
+     cmp tmp.idx test-1-${packname_1}.idx &&
+
+     git-index-pack test-3.pack &&
+     cmp test-3.idx test-1-${packname_1}.idx &&
+
+     cp test-2-${packname_2}.pack test-3.pack &&
+     git-index-pack -o tmp.idx test-2-${packname_2}.pack &&
+     cmp tmp.idx test-2-${packname_2}.idx &&
+
+     git-index-pack test-3.pack &&
+     cmp test-3.idx test-2-${packname_2}.idx &&
 
      :'
 
